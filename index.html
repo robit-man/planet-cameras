@@ -1,0 +1,796 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Earth-Scale Globe • Orbit / Surface / Fly Cameras</title>
+    <!-- Importmap pulling Three.js + addons from jsDelivr CDN -->
+    <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.162.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.162.0/examples/jsm/"
+      }
+    }
+  </script>
+    <style>
+        html,
+        body {
+            height: 100%;
+            margin: 0;
+            background: #0b1220;
+            color: #e7ecf3;
+            font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+        }
+
+        #app {
+            position: fixed;
+            inset: 0;
+            display: grid;
+            grid-template-rows: auto 1fr;
+        }
+
+        header {
+            display: flex;
+            gap: .5rem;
+            align-items: center;
+            padding: .5rem .75rem;
+            background: linear-gradient(180deg, rgba(255, 255, 255, .06), rgba(255, 255, 255, 0));
+            backdrop-filter: blur(6px);
+            border-bottom: 1px solid rgba(255, 255, 255, .08);
+            z-index: 2;
+        }
+
+        header h1 {
+            font-size: 14px;
+            font-weight: 600;
+            letter-spacing: .3px;
+            margin: 0;
+            opacity: .9;
+        }
+
+        .spacer {
+            flex: 1;
+        }
+
+        .btn {
+            appearance: none;
+            border: 1px solid rgba(255, 255, 255, .18);
+            background: rgba(255, 255, 255, .08);
+            color: #e7ecf3;
+            padding: .45rem .7rem;
+            border-radius: 10px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: .15s ease;
+        }
+
+        .btn:hover {
+            background: rgba(255, 255, 255, .14);
+        }
+
+        .btn.active {
+            background: #4b93ff;
+            border-color: #4b93ff;
+            color: #fff;
+        }
+
+        #hud {
+            position: fixed;
+            right: .75rem;
+            bottom: .75rem;
+            background: rgba(0, 0, 0, .55);
+            border: 1px solid rgba(255, 255, 255, .12);
+            border-radius: 12px;
+            padding: .6rem .7rem;
+            font-size: 12px;
+            line-height: 1.45;
+            z-index: 3;
+            min-width: 300px;
+        }
+
+        #hud code {
+            background: rgba(255, 255, 255, .08);
+            padding: 1px 6px;
+            border-radius: 6px;
+        }
+
+        #canvas-holder {
+            position: relative;
+        }
+
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+
+        a,
+        a:visited {
+            color: #a5c7ff;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="app">
+        <header>
+            <h1>Earth-Scale Globe (1 unit = 1 meter)</h1>
+            <div class="spacer"></div>
+            <button id="btnOrbit" class="btn">Orbit</button>
+            <button id="btnSurface" class="btn">Surface</button>
+            <button id="btnFly" class="btn">Fly</button>
+        </header>
+        <div id="canvas-holder"></div>
+    </div>
+
+    <div id="hud"></div>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+        // --- Constants ---------------------------------------------------------
+        const EARTH_RADIUS_M = 6_371_000; // meters (1u = 1m)
+        const EXTREME_FAR = EARTH_RADIUS_M * 1e6;
+
+        const ORBIT_START_DISTANCE = EARTH_RADIUS_M * 3.0;
+        const CAMERA_FOV = 60;
+        const CAMERA_NEAR = 0.1;
+
+        const GRID_LON_STEP_DEG = 10;
+        const GRID_LAT_STEP_DEG = 10;
+        const SURFACE_EYE_HEIGHT = 1.7;
+
+        // Surface movement + sprint/jump
+        const SURFACE_WALK_SPEED = 20;    // m/s base
+        const SURFACE_WALK_SPEED_MAX = 1000;  // m/s base cap (scaled by altitude)
+        const SURFACE_SPRINT_ACCEL = 2000;  // m/s^2
+        const SURFACE_SPRINT_DECEL = 800;   // m/s^2
+        const JUMP_VELOCITY = 8;     // m/s
+        const GRAVITY = 9.81;  // m/s^2
+
+        // Surface zoom (mouse wheel) — Surface mode only
+        const SURFACE_ZOOM_SPEED = 400;                    // meters per wheel delta unit
+        const SURFACE_ZOOM_MIN = 0;
+        const SURFACE_ZOOM_MAX = EARTH_RADIUS_M * 0.5;
+
+        // Orbit → Surface auto-transition
+        const ORBIT_TO_SURFACE_THRESHOLD = EARTH_RADIUS_M * 1.06;
+        const ORBIT_TO_SURFACE_TWEEN_MS = 850;
+
+        // Icosahedron detail
+        const ICOS_DETAIL = 6;
+
+        // --- Texture longitudinal offset (deg). Negative = shift map west; positive = east.
+        // From: clicking -120° read -60° => map ahead by +60°, so apply -60°.
+        const LON_OFFSET_DEG = -60;
+
+        const KEY = {
+            ArrowUp: 'ArrowUp', ArrowDown: 'ArrowDown', ArrowLeft: 'ArrowLeft', ArrowRight: 'ArrowRight',
+            KeyW: 'KeyW', KeyS: 'KeyS', KeyA: 'KeyA', KeyD: 'KeyD',
+            Space: 'Space'
+        };
+
+        // --- State -------------------------------------------------------------
+        const state = {
+            mode: 'orbit', // 'orbit' | 'surface' | 'fly'
+            lastHit: null, // { point: THREE.Vector3, latDeg, lonDeg }
+            size: new THREE.Vector2(),
+            pointer: new THREE.Vector2(),
+            isDraggingSurface: false,
+
+            // Surface orientation (tangent-based)
+            surfacePitch: 0, // radians
+            surfaceForward: new THREE.Vector3(1, 0, 0),
+
+            keys: new Set(),
+
+            // Surface motion
+            surfaceSpeed: SURFACE_WALK_SPEED,
+            surfaceAltitude: 0,
+            surfaceZoom: 0,
+            jumpVel: 0,
+            shiftHeld: false,
+
+            // Orbit→Surface tween
+            tween: {
+                active: false, t0: 0, dur: ORBIT_TO_SURFACE_TWEEN_MS,
+                startPos: new THREE.Vector3(), endPos: new THREE.Vector3(),
+                startQuat: new THREE.Quaternion(), endQuat: new THREE.Quaternion()
+            },
+            lastOrbitZoomInTs: 0
+        };
+
+        // --- Scene / Renderer --------------------------------------------------
+        const holder = document.getElementById('canvas-holder');
+        const renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true });
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        holder.appendChild(renderer.domElement);
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x0b1220);
+
+        // Cameras
+        const cameraOrbit = new THREE.PerspectiveCamera(CAMERA_FOV, 1, CAMERA_NEAR, EXTREME_FAR);
+        cameraOrbit.position.set(ORBIT_START_DISTANCE, ORBIT_START_DISTANCE * 0.4, ORBIT_START_DISTANCE);
+        cameraOrbit.lookAt(0, 0, 0);
+
+        const cameraSurface = new THREE.PerspectiveCamera(CAMERA_FOV, 1, 0.01, EXTREME_FAR);
+        const cameraFly = new THREE.PerspectiveCamera(CAMERA_FOV, 1, CAMERA_NEAR, EXTREME_FAR);
+
+        let activeCamera = cameraOrbit;
+
+        const orbitControls = new OrbitControls(cameraOrbit, renderer.domElement);
+        orbitControls.enableDamping = true;
+        orbitControls.target.set(0, 0, 0);
+        orbitControls.minDistance = EARTH_RADIUS_M * 1.05;
+        orbitControls.maxDistance = EXTREME_FAR;
+
+        // Lights
+        const ambient = new THREE.AmbientLight(0xffffff, 0.25);
+        scene.add(ambient);
+        const hemi = new THREE.HemisphereLight(0xeaf3ff, 0x1b2a45, 0.5);
+        scene.add(hemi);
+        const sun = new THREE.DirectionalLight(0xffffff, 0.85);
+        sun.position.set(1, 1, 0.4).multiplyScalar(EARTH_RADIUS_M * 10);
+        scene.add(sun);
+
+        // --- Globe -------------------------------------------------------------
+        const globe = createGlobe();
+        scene.add(globe);
+
+        const clouds = createClouds();
+        scene.add(clouds);
+
+        const headingLine = createHeadingIndicator();
+        scene.add(headingLine);
+        headingLine.visible = false;
+
+        const clickMarker = createClickMarker();
+        scene.add(clickMarker);
+        clickMarker.visible = false;
+
+        globe.frustumCulled = false;
+        clouds.frustumCulled = false;
+        headingLine.frustumCulled = false;
+        clickMarker.frustumCulled = false;
+
+        // Raycaster
+        const raycaster = new THREE.Raycaster();
+
+        // HUD
+        const hud = document.getElementById('hud');
+
+        // UI buttons
+        const btnOrbit = document.getElementById('btnOrbit');
+        const btnSurface = document.getElementById('btnSurface');
+        const btnFly = document.getElementById('btnFly');
+
+        btnOrbit.addEventListener('click', () => switchMode('orbit'));
+        btnSurface.addEventListener('click', () => switchMode('surface'));
+        btnFly.addEventListener('click', () => switchMode('fly'));
+
+        // --- Resize Handling ---------------------------------------------------
+        function onResize() {
+            const w = holder.clientWidth || window.innerWidth;
+            const h = holder.clientHeight || (window.innerHeight - document.querySelector('header').offsetHeight);
+            state.size.set(w, h);
+            renderer.setSize(w, h, false);
+            [cameraOrbit, cameraSurface, cameraFly].forEach(cam => { cam.aspect = w / h; cam.updateProjectionMatrix(); });
+        }
+        window.addEventListener('resize', onResize);
+        onResize();
+
+        // --- Wheel listeners ---------------------------------------------------
+        renderer.domElement.addEventListener('wheel', (e) => {
+            if (state.mode === 'orbit' && e.deltaY < 0) state.lastOrbitZoomInTs = performance.now();
+        }, { passive: true });
+
+        // Surface zoom
+        renderer.domElement.addEventListener('wheel', (e) => {
+            if (state.mode !== 'surface') return;
+            e.preventDefault();
+            state.surfaceZoom = THREE.MathUtils.clamp(
+                state.surfaceZoom + e.deltaY * SURFACE_ZOOM_SPEED,
+                SURFACE_ZOOM_MIN,
+                SURFACE_ZOOM_MAX
+            );
+            const up = cameraSurface.position.clone().normalize();
+            const newRadius = EARTH_RADIUS_M + SURFACE_EYE_HEIGHT + state.surfaceAltitude + state.surfaceZoom;
+            cameraSurface.position.copy(up.multiplyScalar(newRadius));
+            cameraSurface.up.copy(up);
+            updateSurfaceCameraOrientation();
+        }, { passive: false });
+
+        // --- Click / Raycast ---------------------------------------------------
+        renderer.domElement.addEventListener('pointerdown', (e) => {
+            if (state.mode === 'surface' && e.button === 0) state.isDraggingSurface = true;
+        });
+
+        renderer.domElement.addEventListener('pointerup', (e) => {
+            if (state.mode === 'surface' && state.isDraggingSurface) state.isDraggingSurface = false;
+
+            if (e.button === 0) {
+                const rect = renderer.domElement.getBoundingClientRect();
+                const x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+                const y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+                state.pointer.set(x, y);
+                raycaster.setFromCamera(state.pointer, activeCamera);
+                const hits = raycaster.intersectObject(globe, false);
+                if (hits.length) {
+                    const p = hits[0].point.clone();
+                    const latLon = pointToLatLon(p, EARTH_RADIUS_M);
+                    state.lastHit = { point: p, latDeg: latLon.latDeg, lonDeg: latLon.lonDeg };
+                    clickMarker.position.copy(p);
+                    clickMarker.visible = true;
+                    if (state.mode === 'surface') placeSurfaceCameraFromPoint(p, activeCamera);
+                }
+            }
+        });
+
+        // Drag to yaw/pitch (tangent frame)
+        renderer.domElement.addEventListener('pointermove', (e) => {
+            if (state.mode !== 'surface' || !state.isDraggingSurface) return;
+            const movementX = e.movementX || 0;
+            const movementY = e.movementY || 0;
+            const yawSpeed = 0.005;
+            const pitchSpeed = 0.004;
+
+            const up = cameraSurface.position.clone().normalize();
+            state.surfaceForward.applyAxisAngle(up, +movementX * yawSpeed); // right drag -> look left
+            state.surfacePitch -= movementY * pitchSpeed;
+            state.surfacePitch = THREE.MathUtils.clamp(state.surfacePitch, THREE.MathUtils.degToRad(-85), THREE.MathUtils.degToRad(85));
+            updateSurfaceCameraOrientation();
+        });
+
+        // --- Keyboard ----------------------------------------------------------
+        window.addEventListener('keydown', (e) => {
+            if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) e.preventDefault();
+            if (['KeyW', 'KeyA', 'KeyS', 'KeyD'].includes(e.code)) e.preventDefault();
+            state.keys.add(e.code);
+            if (e.key === 'Shift' || (e.code && e.code.startsWith('Shift'))) state.shiftHeld = true;
+
+            // Jump
+            if (state.mode === 'surface' && e.code === 'Space' && state.surfaceAltitude === 0 && state.jumpVel === 0) {
+                state.jumpVel = JUMP_VELOCITY;
+            }
+        });
+
+        window.addEventListener('keyup', (e) => {
+            state.keys.delete(e.code);
+            if (e.key === 'Shift' || (e.code && e.code.startsWith('Shift'))) state.shiftHeld = false;
+        });
+
+        // --- Mode Switching ----------------------------------------------------
+        function setModeUI(next) {
+            btnOrbit.classList.toggle('active', next === 'orbit');
+            btnSurface.classList.toggle('active', next === 'surface');
+            btnFly.classList.toggle('active', next === 'fly');
+        }
+
+        function switchMode(next, opts = {}) {
+            state.mode = next;
+            setModeUI(next);
+
+            if (next === 'orbit') {
+                cameraOrbit.position.copy(activeCamera.position);
+                cameraOrbit.quaternion.copy(activeCamera.quaternion);
+                orbitControls.update();
+                activeCamera = cameraOrbit;
+            }
+
+            if (next === 'surface') {
+                if (opts.keepPose) {
+                    activeCamera = cameraSurface;
+                } else {
+                    const point = state.lastHit?.point ?? new THREE.Vector3(1, 0, 0).multiplyScalar(EARTH_RADIUS_M);
+                    placeSurfaceCameraFromPoint(point, activeCamera);
+                    activeCamera = cameraSurface;
+                }
+            }
+
+            if (next === 'fly') {
+                cameraFly.position.copy(activeCamera.position);
+                cameraFly.quaternion.copy(activeCamera.quaternion);
+                activeCamera = cameraFly;
+            }
+
+            [cameraOrbit, cameraSurface, cameraFly].forEach(cam => { cam.far = EXTREME_FAR; cam.updateProjectionMatrix(); });
+            renderHUD();
+        }
+
+        // --- Orbit → Surface tween --------------------------------------------
+        function startOrbitToSurfaceTween() {
+            if (state.tween.active || state.mode !== 'orbit') return;
+
+            const up = cameraOrbit.position.clone().normalize();
+            const surfacePoint = up.clone().multiplyScalar(EARTH_RADIUS_M);
+
+            state.surfaceZoom = 0;
+            placeSurfaceCameraFromPoint(surfacePoint, cameraOrbit);
+
+            state.tween.startPos.copy(cameraOrbit.position);
+            state.tween.endPos.copy(cameraSurface.position);
+            state.tween.startQuat.copy(cameraOrbit.quaternion);
+            state.tween.endQuat.copy(cameraSurface.quaternion);
+            state.tween.t0 = performance.now();
+            state.tween.active = true;
+
+            orbitControls.enabled = false;
+        }
+
+        function runOrbitToSurfaceTween(now) {
+            const tNorm = THREE.MathUtils.clamp((now - state.tween.t0) / state.tween.dur, 0, 1);
+            const k = easeInOutCubic(tNorm);
+
+            cameraOrbit.position.lerpVectors(state.tween.startPos, state.tween.endPos, k);
+            cameraOrbit.quaternion.slerpQuaternions(state.tween.startQuat, state.tween.endQuat, k);
+
+            if (tNorm >= 1) {
+                state.tween.active = false;
+                orbitControls.enabled = true;
+                switchMode('surface', { keepPose: true });
+            }
+        }
+
+        function easeInOutCubic(t) { return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; }
+
+        // --- Surface placement/orientation (tangent-based) ---------------------
+        function placeSurfaceCameraFromPoint(pointOnSurface, cascadeFromCamera) {
+            const up = pointOnSurface.clone().normalize();
+
+            const eyeRadius = EARTH_RADIUS_M + SURFACE_EYE_HEIGHT + state.surfaceAltitude + state.surfaceZoom;
+            const eye = up.clone().multiplyScalar(eyeRadius);
+            cameraSurface.position.copy(eye);
+            cameraSurface.up.copy(up);
+
+            // Initialize surfaceForward from prior camera's view, projected to tangent
+            const prevForward = new THREE.Vector3();
+            cascadeFromCamera.getWorldDirection(prevForward);
+            const tangentFwd = prevForward.clone().sub(up.clone().multiplyScalar(prevForward.dot(up)));
+            if (tangentFwd.lengthSq() < 1e-12) {
+                const worldRef = Math.abs(up.z) < 0.99 ? new THREE.Vector3(0, 0, 1) : new THREE.Vector3(1, 0, 0);
+                state.surfaceForward.copy(worldRef.clone().sub(up.clone().multiplyScalar(worldRef.dot(up))).normalize());
+            } else {
+                state.surfaceForward.copy(tangentFwd.normalize());
+            }
+
+            const pitch = Math.asin(THREE.MathUtils.clamp(prevForward.dot(up), -1, 1));
+            state.surfacePitch = THREE.MathUtils.clamp(pitch, THREE.MathUtils.degToRad(-85), THREE.MathUtils.degToRad(85));
+
+            const surfPoint = up.clone().multiplyScalar(EARTH_RADIUS_M);
+            const ll = pointToLatLon(surfPoint, EARTH_RADIUS_M);
+            state.lastHit = { point: surfPoint, latDeg: ll.latDeg, lonDeg: ll.lonDeg };
+            clickMarker.position.copy(surfPoint);
+            clickMarker.visible = true;
+
+            updateSurfaceCameraOrientation();
+        }
+
+        function updateSurfaceCameraOrientation() {
+            const up = cameraSurface.position.clone().normalize();
+            const tangentFwd = state.surfaceForward.clone().sub(up.clone().multiplyScalar(state.surfaceForward.dot(up))).normalize();
+
+            const forward = new THREE.Vector3()
+                .copy(tangentFwd).multiplyScalar(Math.cos(state.surfacePitch))
+                .add(up.clone().multiplyScalar(Math.sin(state.surfacePitch)));
+
+            state.surfaceForward.copy(tangentFwd);
+            cameraSurface.lookAt(cameraSurface.position.clone().add(forward));
+        }
+
+        // --- Surface Walking / Sprint / Jump ----------------------------------
+        function updateSurfaceWalking(dt) {
+            if (state.mode !== 'surface') return;
+
+            // Gravity + jump
+            if (state.surfaceAltitude > 0 || state.jumpVel > 0) {
+                state.jumpVel -= GRAVITY * dt;
+                state.surfaceAltitude = Math.max(0, state.surfaceAltitude + state.jumpVel * dt);
+                if (state.surfaceAltitude === 0 && state.jumpVel < 0) state.jumpVel = 0;
+            }
+
+            // Current up from position
+            const pos = cameraSurface.position.clone();
+            const up = pos.clone().normalize();
+
+            // Tangent forward & right
+            const forwardTangent = state.surfaceForward.clone().sub(up.clone().multiplyScalar(state.surfaceForward.dot(up))).normalize();
+            const right = new THREE.Vector3().crossVectors(forwardTangent, up).normalize();
+
+            // Input
+            const dir = new THREE.Vector3();
+            if (state.keys.has('ArrowUp')) dir.sub(forwardTangent);
+            if (state.keys.has('ArrowDown')) dir.add(forwardTangent);
+            if (state.keys.has('ArrowRight')) dir.sub(right);
+            if (state.keys.has('ArrowLeft')) dir.add(right);
+
+            const altitudeAGL = SURFACE_EYE_HEIGHT + state.surfaceAltitude + state.surfaceZoom;
+            const dynamicMax = SURFACE_WALK_SPEED_MAX * Math.max(1, altitudeAGL);
+
+            const sprintHeld = state.shiftHeld || state.keys.has('ShiftLeft') || state.keys.has('ShiftRight');
+            if (sprintHeld) {
+                state.surfaceSpeed = Math.min(dynamicMax, state.surfaceSpeed + SURFACE_SPRINT_ACCEL * dt);
+            } else {
+                state.surfaceSpeed = Math.max(SURFACE_WALK_SPEED, Math.min(dynamicMax, state.surfaceSpeed - SURFACE_SPRINT_DECEL * dt));
+            }
+
+            const radiusEye = EARTH_RADIUS_M + altitudeAGL;
+
+            if (dir.lengthSq() > 0) {
+                dir.normalize();
+                const distance = state.surfaceSpeed * dt;
+                const theta = distance / EARTH_RADIUS_M;
+                const axis = new THREE.Vector3().crossVectors(dir, up);
+                if (axis.lengthSq() > 1e-12) {
+                    axis.normalize();
+                    cameraSurface.position.applyAxisAngle(axis, theta);
+                    cameraSurface.position.setLength(radiusEye);
+
+                    // parallel transport heading
+                    state.surfaceForward.applyAxisAngle(axis, theta);
+                    state.surfaceForward.sub(up.clone().multiplyScalar(state.surfaceForward.dot(up))).normalize();
+                }
+            } else {
+                cameraSurface.position.setLength(radiusEye);
+            }
+
+            cameraSurface.up.copy(cameraSurface.position.clone().normalize());
+            updateSurfaceCameraOrientation();
+
+            const surfacePoint = cameraSurface.up.clone().multiplyScalar(EARTH_RADIUS_M);
+            const ll = pointToLatLon(surfacePoint, EARTH_RADIUS_M);
+            state.lastHit = { point: surfacePoint, latDeg: ll.latDeg, lonDeg: ll.lonDeg };
+            clickMarker.position.copy(surfacePoint);
+            clickMarker.visible = true;
+
+            state._dynamicMax = dynamicMax;
+        }
+
+        // --- Fly Camera --------------------------------------------------------
+        function updateFlyCamera(dt) {
+            if (state.mode !== 'fly') return;
+
+            const rotRate = 1.2; // rad/s
+            const moveSpeed = EARTH_RADIUS_M * 0.1;
+
+            const forward = new THREE.Vector3();
+            cameraFly.getWorldDirection(forward);
+
+            const yawDelta = rotRate * dt;
+            const pitchDelta = rotRate * dt;
+            const rollDelta = rotRate * dt;
+
+            if (state.keys.has('KeyA')) cameraFly.rotateOnAxis(new THREE.Vector3(0, 1, 0), +yawDelta);
+            if (state.keys.has('KeyD')) cameraFly.rotateOnAxis(new THREE.Vector3(0, 1, 0), -yawDelta);
+            if (state.keys.has('KeyW')) cameraFly.rotateOnAxis(new THREE.Vector3(1, 0, 0), +pitchDelta);
+            if (state.keys.has('KeyS')) cameraFly.rotateOnAxis(new THREE.Vector3(1, 0, 0), -pitchDelta);
+            if (state.keys.has('ArrowLeft')) cameraFly.rotateOnAxis(new THREE.Vector3(0, 0, 1), +rollDelta);
+            if (state.keys.has('ArrowRight')) cameraFly.rotateOnAxis(new THREE.Vector3(0, 0, 1), -rollDelta);
+
+            cameraFly.updateMatrixWorld();
+
+            cameraFly.getWorldDirection(forward);
+
+            const move = new THREE.Vector3();
+            if (state.keys.has('ArrowUp')) move.add(forward);
+            if (state.keys.has('ArrowDown')) move.sub(forward);
+            if (move.lengthSq() > 0) {
+                move.normalize().multiplyScalar(moveSpeed * dt);
+                cameraFly.position.add(move);
+            }
+        }
+
+        // --- Animation Loop ----------------------------------------------------
+        let lastTime = performance.now();
+        function animate(now = performance.now()) {
+            const dt = (now - lastTime) / 1000;
+            lastTime = now;
+
+            // Orbit->Surface auto-transition
+            if (state.mode === 'orbit' && !state.tween.active) {
+                const dist = cameraOrbit.position.length();
+                const recentlyZoomedIn = (now - state.lastOrbitZoomInTs) < 600;
+                if (recentlyZoomedIn && dist <= ORBIT_TO_SURFACE_THRESHOLD) startOrbitToSurfaceTween();
+            }
+            if (state.tween.active) runOrbitToSurfaceTween(now);
+
+            orbitControls.enabled = (state.mode === 'orbit') && !state.tween.active;
+            if (orbitControls.enabled) orbitControls.update();
+
+            updateFlyCamera(dt);
+            updateSurfaceWalking(dt);
+            headingLine.visible = state.mode === 'surface';
+            if (headingLine.visible) updateHeadingIndicator();
+
+            renderHUD();
+            renderer.render(scene, activeCamera);
+            requestAnimationFrame(animate);
+        }
+        animate();
+
+        // --- HUD / Helpers -----------------------------------------------------
+        function renderHUD() {
+            const modeLabel = state.mode === 'orbit' ? 'Orbit (mouse drag + wheel; zoom in to auto-enter Surface)' :
+                state.mode === 'surface' ? 'Surface (scroll = zoom altitude, drag yaw/pitch, arrows move, Space jump, Shift sprint)' :
+                    'Fly (W/S/A/D look, ArrowUp/Down move, ArrowLeft/Right roll)';
+
+            const ll = state.lastHit ? `${state.lastHit.latDeg.toFixed(6)}°, ${state.lastHit.lonDeg.toFixed(6)}°` : '—';
+
+            const altitudeAGL = (SURFACE_EYE_HEIGHT + state.surfaceAltitude + state.surfaceZoom);
+            const baseSpeed = state.mode === 'surface' ? state.surfaceSpeed : 0;
+            const dynMax = state.mode === 'surface' ? (state._dynamicMax ?? SURFACE_WALK_SPEED_MAX * Math.max(1, altitudeAGL)) : 0;
+
+            const speedLine = state.mode === 'surface'
+                ? `<div><strong>Speed:</strong> ${baseSpeed.toLocaleString(undefined, { maximumFractionDigits: 1 })} m/s <span style="opacity:.8"> (cap: ${dynMax.toLocaleString(undefined, { maximumFractionDigits: 1 })})</span></div>`
+                : `<div><strong>Speed:</strong> —</div>`;
+
+            const altLine = state.mode === 'surface'
+                ? `<div><strong>Altitude above ground:</strong> ${altitudeAGL.toLocaleString(undefined, { maximumFractionDigits: 1 })} m</div>`
+                : `<div><strong>Altitude above ground:</strong> —</div>`;
+
+            const tweenLine = state.tween.active ? `<div><strong>Transition:</strong> Orbit → Surface…</div>` : '';
+
+            hud.innerHTML = `
+        <div><strong>Mode:</strong> ${modeLabel}</div>
+        <div><strong>Earth radius:</strong> ${EARTH_RADIUS_M.toLocaleString()} m</div>
+        <div><strong>Current lat/lon:</strong> <code>${ll}</code></div>
+        ${speedLine}
+        ${altLine}
+        ${tweenLine}
+      `;
+        }
+
+        // Apply a longitude offset to a texture (wrap S must be RepeatWrapping)
+        function applyLonOffset(tex, deg) {
+            if (!tex) return;
+            tex.wrapS = THREE.RepeatWrapping;
+            // Keep T clamped to avoid seams at poles (typical for globe)
+            if (tex.wrapT !== THREE.ClampToEdgeWrapping) tex.wrapT = THREE.ClampToEdgeWrapping;
+            const off = ((deg / 360) % 1 + 1) % 1; // normalize to [0,1)
+            tex.offset.x = off;
+            tex.needsUpdate = true;
+        }
+
+        function createGlobe() {
+            const gridTex = makeLatLonGridTexture(2048, 1024, GRID_LAT_STEP_DEG, GRID_LON_STEP_DEG);
+            gridTex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+            // Grid stays aligned with geometry (no offset), so you can trust lat/lon.
+
+            const geom = new THREE.IcosahedronGeometry(EARTH_RADIUS_M, ICOS_DETAIL);
+
+            const loader = new THREE.TextureLoader();
+            loader.setCrossOrigin('anonymous');
+
+            const earthMap = loader.load('2k_earth_daymap.jpg');
+            const earthNormal = loader.load('https://cdn.jsdelivr.net/npm/three@0.162.0/examples/textures/planets/earth_normal_2048.jpg');
+
+            earthMap.colorSpace = THREE.SRGBColorSpace;
+            earthMap.anisotropy = renderer.capabilities.getMaxAnisotropy();
+            earthNormal.anisotropy = renderer.capabilities.getMaxAnisotropy();
+
+            // >>> Apply longitude offset so visual matches computed lon <<<
+            applyLonOffset(earthMap, LON_OFFSET_DEG);
+            applyLonOffset(earthNormal, LON_OFFSET_DEG); // keep normals aligned with albedo
+
+            const mat = new THREE.MeshStandardMaterial({
+                map: earthMap,
+                normalMap: earthNormal,
+                roughness: 1.0,
+                metalness: 0.0,
+                emissive: 0x000000,
+                emissiveMap: gridTex,
+                emissiveIntensity: 0.35
+            });
+
+            const mesh = new THREE.Mesh(geom, mat);
+            mesh.receiveShadow = false;
+            mesh.castShadow = false;
+            return mesh;
+        }
+
+        function createClickMarker() {
+            const markerRadius = 80_000;
+            const geom = new THREE.SphereGeometry(markerRadius, 24, 16);
+            const mat = new THREE.MeshBasicMaterial({ color: 0xffcc00 });
+            return new THREE.Mesh(geom, mat);
+        }
+
+        function createClouds() {
+            const loader = new THREE.TextureLoader();
+            loader.setCrossOrigin('anonymous');
+            const cloudsMap = loader.load('https://cdn.jsdelivr.net/npm/three@0.162.0/examples/textures/planets/earth_clouds_1024.png');
+            // Optional: apply the same offset to clouds if you want them to match continents
+            // applyLonOffset(cloudsMap, LON_OFFSET_DEG);
+
+            const geom = new THREE.SphereGeometry(EARTH_RADIUS_M + 35_000, 128, 64);
+            const mat = new THREE.MeshBasicMaterial({ map: cloudsMap, transparent: true, opacity: 0.5, depthWrite: false });
+            return new THREE.Mesh(geom, mat);
+        }
+
+        function createHeadingIndicator() {
+            const geom = new THREE.BufferGeometry();
+            const positions = new Float32Array(6); // 2 points
+            geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            const mat = new THREE.LineBasicMaterial({ color: 0x00e0ff, linewidth: 2 });
+            return new THREE.Line(geom, mat);
+        }
+
+        function updateHeadingIndicator() {
+            if (state.mode !== 'surface') return;
+
+            const up = cameraSurface.position.clone().normalize();
+            const forwardTangent = state.surfaceForward.clone().sub(up.clone().multiplyScalar(state.surfaceForward.dot(up))).normalize();
+
+            const start = up.clone().multiplyScalar(EARTH_RADIUS_M + 2000);
+            const axis = new THREE.Vector3().crossVectors(forwardTangent, up).normalize();
+            const arcMeters = 400_000;
+            const theta = arcMeters / EARTH_RADIUS_M;
+            const end = start.clone().applyAxisAngle(axis, theta);
+
+            const pos = headingLine.geometry.attributes.position.array;
+            pos[0] = start.x; pos[1] = start.y; pos[2] = start.z;
+            pos[3] = end.x; pos[4] = end.y; pos[5] = end.z;
+            headingLine.geometry.attributes.position.needsUpdate = true;
+            headingLine.geometry.computeBoundingSphere();
+        }
+
+        function pointToLatLon(p, radius) {
+            const r = radius;
+            const lat = Math.asin(THREE.MathUtils.clamp(p.y / r, -1, 1));
+            const lon = Math.atan2(p.z, p.x);
+            return { latRad: lat, lonRad: lon, latDeg: THREE.MathUtils.radToDeg(lat), lonDeg: THREE.MathUtils.radToDeg(lon) };
+        }
+
+        function makeLatLonGridTexture(w, h, latStepDeg, lonStepDeg) {
+            const c = document.createElement('canvas');
+            c.width = w; c.height = h;
+            const ctx = c.getContext('2d');
+
+            ctx.fillStyle = '#000'; ctx.fillRect(0, 0, w, h);
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 2; ctx.globalAlpha = 0.9;
+
+            const emphasize = (fn) => { ctx.save(); ctx.lineWidth = 3.5; fn(); ctx.restore(); };
+
+            for (let lon = -180; lon <= 180; lon += lonStepDeg) {
+                const x = ((lon + 180) / 360) * w;
+                if (Math.abs(lon) < 1e-6) {
+                    emphasize(() => { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke(); });
+                } else {
+                    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
+                }
+            }
+
+            for (let lat = -90; lat <= 90; lat += latStepDeg) {
+                const y = ((90 - lat) / 180) * h;
+                if (Math.abs(lat) < 1e-6) {
+                    emphasize(() => { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke(); });
+                } else {
+                    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+                }
+            }
+
+            ctx.font = '24px system-ui, sans-serif';
+            ctx.fillStyle = '#fff'; ctx.globalAlpha = 0.95;
+            for (let lat = -80; lat <= 80; lat += 20) {
+                const y = ((90 - lat) / 180) * h;
+                ctx.fillText(`${lat}°`, 10, y - 6);
+            }
+            for (let lon = -160; lon <= 160; lon += 20) {
+                const x = ((lon + 180) / 360) * w;
+                ctx.fillText(`${lon}°`, x + 6, 26);
+            }
+
+            const tex = new THREE.CanvasTexture(c);
+            tex.wrapS = THREE.RepeatWrapping;
+            tex.wrapT = THREE.ClampToEdgeWrapping;
+            return tex;
+        }
+
+    </script>
+</body>
+
+</html>
