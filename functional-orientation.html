@@ -1,0 +1,661 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<title>Functional Globe - Surface-Aligned Phone Orientation</title>
+<!-- Importmap pulling Three.js + addons from jsDelivr CDN -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.162.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.162.0/examples/jsm/"
+  }
+}
+</script>
+<style>
+  html,body { margin:0; height:100%; background:#0b0d12; color:#dfe6ee; font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif; }
+  #app { position:fixed; inset:0; display:grid; grid-template-rows:auto 1fr auto; }
+  canvas { display:block; }
+  #header {
+    display:flex; gap:.75rem; flex-wrap:wrap; align-items:center;
+    padding:.5rem .75rem; background:linear-gradient(180deg, #0b0d12 0, #0b0d12dd 60%, #0b0d12 100%);
+    border-bottom:1px solid #182031; font-size:.9rem;
+  }
+  #hud {
+    display:flex; gap:.75rem; flex-wrap:wrap; align-items:center;
+    padding:.5rem .75rem; background:linear-gradient(180deg, #0b0d12 0, #0b0d12dd 60%, #0b0d12 100%);
+    border-top:1px solid #182031; font-size:.9rem; max-height:40vh; overflow-y:auto;
+  }
+  .pill { padding:.25rem .5rem; border:1px solid #2a344a; border-radius:8px; background:#101525; }
+  button {
+    appearance:none; border:none; cursor:pointer; font-weight:600; padding:.6rem .9rem; border-radius:10px;
+    color:#0b0d12; background:#8bd1ff;
+  }
+  button:active{ transform:translateY(1px) }
+  button.active { background:#4b93ff; color:#fff; }
+  .spacer { flex:1; }
+  #overlay { position:fixed; inset:0; display:none; place-items:center; background:#0b0d12f2; z-index:10; }
+  #overlay.show { display:grid; }
+  #overlay .card {
+    max-width:520px; padding:1rem 1.25rem; border:1px solid #263149; border-radius:12px; background:#0d1220; box-shadow:0 8px 30px rgba(0,0,0,.35);
+  }
+  .small { font-size:.8rem; opacity:.8 }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="header">
+    <h3 style="margin:0">Functional Globe</h3>
+    <button id="btnOrbit">Orbit</button>
+    <button id="btnSurface" class="active">Surface</button>
+    <div class="spacer"></div>
+    <div class="pill">GPS: <span id="gpsStatus">—</span></div>
+    <div class="pill">Compass: <span id="compassStatus">—</span></div>
+    <button id="recalibrate">Recalibrate Heading</button>
+  </div>
+
+  <canvas id="c"></canvas>
+
+  <div id="hud">
+    <div class="pill">Mode: <span id="mode">surface</span></div>
+    <div class="pill">Lat/Lon: <span id="latlon">—</span></div>
+    <div class="pill">Heading°: <span id="heading">—</span></div>
+    <div class="pill">Pitch°: <span id="pitch">—</span></div>
+    <div class="pill">Roll°: <span id="roll">—</span></div>
+    <div class="pill">Aligned: <span id="aligned">no</span></div>
+    <div class="pill">FPS: <span id="fps">—</span></div>
+    <div class="pill">Altitude: <span id="altitude">—</span></div>
+    <span class="small">Tip: Camera orientation follows phone with compass-first alignment.</span>
+  </div>
+</div>
+
+<div id="overlay" class="show">
+  <div class="card">
+    <h3>Enable Motion, Compass & GPS</h3>
+    <p>This demo needs orientation (gyro), compass, and GPS to place you on the globe with accurate heading.</p>
+    <p class="small">iOS Safari requires a tap to enable sensors.</p>
+    <div style="display:flex; gap:.5rem; margin-top:.75rem">
+      <button id="enable">Enable All Sensors</button>
+      <button id="continue">Try without Compass</button>
+    </div>
+    <p id="status" class="small" style="margin-top:.5rem; opacity:.85;"></p>
+  </div>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ──────────────────────── Constants ────────────────────────
+const EARTH_RADIUS_M = 6_371_000;
+const CAMERA_FOV = 65;
+const CAMERA_NEAR = 0.01;
+const CAMERA_FAR = EARTH_RADIUS_M * 100;
+const SURFACE_EYE_HEIGHT = 1.7;
+const ORBIT_START_DISTANCE = EARTH_RADIUS_M * 2.5;
+
+const isSecure = location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+const isiOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
+// ──────────────────────── DOM ────────────────────────
+const dom = {
+  canvas: document.getElementById('c'),
+  overlay: document.getElementById('overlay'),
+  enable: document.getElementById('enable'),
+  continue: document.getElementById('continue'),
+  status: document.getElementById('status'),
+  btnOrbit: document.getElementById('btnOrbit'),
+  btnSurface: document.getElementById('btnSurface'),
+  recalibrate: document.getElementById('recalibrate'),
+  mode: document.getElementById('mode'),
+  latlon: document.getElementById('latlon'),
+  heading: document.getElementById('heading'),
+  pitch: document.getElementById('pitch'),
+  roll: document.getElementById('roll'),
+  aligned: document.getElementById('aligned'),
+  fps: document.getElementById('fps'),
+  altitude: document.getElementById('altitude'),
+  gpsStatus: document.getElementById('gpsStatus'),
+  compassStatus: document.getElementById('compassStatus'),
+};
+
+// ──────────────────────── Three.js Scene ────────────────────────
+const renderer = new THREE.WebGLRenderer({ canvas: dom.canvas, antialias: true, logarithmicDepthBuffer: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0b0d12);
+
+const cameraOrbit = new THREE.PerspectiveCamera(CAMERA_FOV, innerWidth/innerHeight, CAMERA_NEAR, CAMERA_FAR);
+cameraOrbit.position.set(ORBIT_START_DISTANCE, ORBIT_START_DISTANCE*0.4, ORBIT_START_DISTANCE);
+cameraOrbit.lookAt(0,0,0);
+
+const cameraSurface = new THREE.PerspectiveCamera(CAMERA_FOV, innerWidth/innerHeight, CAMERA_NEAR, CAMERA_FAR);
+
+let activeCamera = cameraSurface;
+let mode = 'surface';
+
+const orbitControls = new OrbitControls(cameraOrbit, renderer.domElement);
+orbitControls.enableDamping = true;
+orbitControls.target.set(0,0,0);
+orbitControls.minDistance = EARTH_RADIUS_M*1.05;
+orbitControls.maxDistance = CAMERA_FAR;
+orbitControls.enabled = false;
+
+// Lighting
+scene.add(new THREE.AmbientLight(0xffffff, 0.3));
+const hemi = new THREE.HemisphereLight(0xbfd8ff, 0x101318, 0.5);
+scene.add(hemi);
+const sun = new THREE.DirectionalLight(0xffffff, 0.7);
+sun.position.set(5, 10, 7).multiplyScalar(EARTH_RADIUS_M * 2);
+scene.add(sun);
+
+// Globe
+const globeGeometry = new THREE.IcosahedronGeometry(EARTH_RADIUS_M, 6);
+const loader = new THREE.TextureLoader();
+const earthTexture = loader.load('2k_earth_daymap.jpg', (tex) => {
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+});
+const globeMaterial = new THREE.MeshStandardMaterial({
+  map: earthTexture,
+  roughness: 1.0,
+  metalness: 0.0
+});
+const globe = new THREE.Mesh(globeGeometry, globeMaterial);
+scene.add(globe);
+
+// Position marker (yellow sphere)
+const markerGeometry = new THREE.SphereGeometry(50000, 16, 16);
+const markerMaterial = new THREE.MeshBasicMaterial({ color: 0xffcc00 });
+const marker = new THREE.Mesh(markerGeometry, markerMaterial);
+marker.visible = false;
+scene.add(marker);
+
+// Heading indicator (cyan line pointing forward)
+const headingGeometry = new THREE.BufferGeometry();
+const headingPositions = new Float32Array(6);
+headingGeometry.setAttribute('position', new THREE.BufferAttribute(headingPositions, 3));
+const headingLine = new THREE.Line(headingGeometry, new THREE.LineBasicMaterial({ color: 0x00e0ff, linewidth: 3 }));
+headingLine.visible = false;
+scene.add(headingLine);
+
+globe.frustumCulled = marker.frustumCulled = headingLine.frustumCulled = false;
+
+function onResize() {
+  const aspect = innerWidth / innerHeight;
+  cameraOrbit.aspect = cameraSurface.aspect = aspect;
+  cameraOrbit.updateProjectionMatrix();
+  cameraSurface.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+}
+addEventListener('resize', onResize);
+
+// ──────────────────────── Orientation System (from orientation.html) ────────────────────────
+const Y_UP = new THREE.Vector3(0,1,0);
+const Z_AXIS = new THREE.Vector3(0,0,1);
+
+// Quaternions
+const qDevice = new THREE.Quaternion();        // raw device orientation (camera convention: forward=-Z, up=+Y)
+const qYawOffset = new THREE.Quaternion();     // compass-first yaw offset (applied once)
+const qLocalToWorld = new THREE.Quaternion();  // transform from local ENU to world space
+const qFinal = new THREE.Quaternion();         // final camera quaternion
+
+// Euler conversion helpers (for DeviceOrientation fallback)
+const eulerYXZ = new THREE.Euler(0,0,0,'YXZ');
+const q1 = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5)); // -PI/2 about X
+
+function setFromDeviceEuler(outQ, alpha, beta, gamma, screenOrientRad) {
+  eulerYXZ.set(beta, alpha, -gamma, 'YXZ');
+  outQ.setFromEuler(eulerYXZ);
+  outQ.multiply(q1);
+  const q0 = new THREE.Quaternion().setFromAxisAngle(Z_AXIS, -screenOrientRad);
+  outQ.multiply(q0);
+  return outQ;
+}
+
+function getScreenAngleRad() {
+  const angle = (screen.orientation && typeof screen.orientation.angle === 'number')
+    ? screen.orientation.angle
+    : (window.orientation || 0);
+  return angle * Math.PI / 180;
+}
+
+function screenAngle() {
+  if (screen.orientation && typeof screen.orientation.angle === 'number') return screen.orientation.angle;
+  return (typeof window.orientation === 'number') ? window.orientation : 0;
+}
+
+// Extract yaw from quaternion (in LOCAL ENU frame: 0=North(-Z), +90°=East(+X))
+const fwd = new THREE.Vector3();
+function yawFromQuaternion(q) {
+  fwd.set(0,0,-1).applyQuaternion(q);
+  return Math.atan2(-fwd.x, -fwd.z);
+}
+
+// ──────────────────────── Sensor State ────────────────────────
+let usingSensor = '—';
+let permissionState = '—';
+let haveCompass = false;
+let compassDeg = null;
+let smoothedCompassDeg = null;
+let manualYawOffsetRad = 0;  // compass-first alignment offset
+let initialAligned = false;
+let awaitingInitialHeading = false;
+
+// DeviceOrientation raw angles
+let DO = { alpha: null, beta: null, gamma: null };
+
+// ──────────────────────── GPS State ────────────────────────
+let gps = {
+  have: false,
+  lat: null,
+  lon: null,
+  alt: 0,
+  acc: null,
+  heading: null,
+  speed: null
+};
+let surfacePosition = new THREE.Vector3(1, 0, 0).multiplyScalar(EARTH_RADIUS_M); // default starting position
+
+// ──────────────────────── Math Helpers ────────────────────────
+const norm360 = d => (d % 360 + 360) % 360;
+function deltaDeg(a, b) {
+  let d = norm360(a) - norm360(b);
+  if (d > 180) d -= 360;
+  if (d <= -180) d += 360;
+  return d;
+}
+function normPi(rad) {
+  let r = (rad + Math.PI) % (2*Math.PI);
+  if (r < 0) r += 2*Math.PI;
+  return r - Math.PI;
+}
+
+// Convert lat/lon to cartesian (globe surface)
+function latLonToCartesian(latDeg, lonDeg, altMeters = 0) {
+  const latRad = THREE.MathUtils.degToRad(latDeg);
+  const lonRad = THREE.MathUtils.degToRad(lonDeg);
+  const r = EARTH_RADIUS_M + altMeters;
+  const x = r * Math.cos(latRad) * Math.cos(lonRad);
+  const y = r * Math.sin(latRad);
+  const z = r * Math.cos(latRad) * Math.sin(lonRad);
+  return new THREE.Vector3(x, y, z);
+}
+
+// Convert cartesian to lat/lon
+function cartesianToLatLon(vec) {
+  const r = vec.length();
+  const lat = Math.asin(THREE.MathUtils.clamp(vec.y / r, -1, 1));
+  const lon = Math.atan2(vec.z, vec.x);
+  return {
+    latDeg: THREE.MathUtils.radToDeg(lat),
+    lonDeg: THREE.MathUtils.radToDeg(lon)
+  };
+}
+
+// ──────────────────────── AbsoluteOrientationSensor ────────────────────────
+let absSensor = null;
+async function tryStartAbsoluteSensor() {
+  if (!('AbsoluteOrientationSensor' in window)) return false;
+  try {
+    absSensor = new AbsoluteOrientationSensor({ frequency: 60, referenceFrame: 'screen' });
+  } catch { return false; }
+
+  return new Promise((resolve) => {
+    let started = false;
+    absSensor.addEventListener('reading', () => {
+      if (!started) {
+        started = true;
+        usingSensor = 'AbsoluteOrientationSensor';
+        dom.compassStatus.textContent = usingSensor + (haveCompass ? ' + compass' : '');
+        resolve(true);
+      }
+      qDevice.fromArray(absSensor.quaternion);
+    });
+    absSensor.addEventListener('error', () => resolve(false));
+    try { absSensor.start(); } catch { resolve(false); }
+  });
+}
+
+// ──────────────────────── DeviceOrientation Fallback ────────────────────────
+function computeHeadingFromDO(ev) {
+  if (typeof ev.webkitCompassHeading === 'number' && !Number.isNaN(ev.webkitCompassHeading)) {
+    haveCompass = true;
+    return norm360(ev.webkitCompassHeading); // iOS: 0/360 = North (clockwise)
+  }
+  if (typeof ev.alpha === 'number' && !Number.isNaN(ev.alpha)) {
+    let hdg = 360 - ev.alpha;
+    hdg += screenAngle();
+    haveCompass = true;
+    return norm360(hdg);
+  }
+  return null;
+}
+
+let doHandler = null;
+function startDeviceOrientation() {
+  usingSensor = 'DeviceOrientationEvent';
+  dom.compassStatus.textContent = usingSensor + (haveCompass ? ' + compass' : '');
+  doHandler = (ev) => {
+    DO.alpha = (typeof ev.alpha === 'number') ? ev.alpha : null;
+    DO.beta  = (typeof ev.beta  === 'number') ? ev.beta  : null;
+    DO.gamma = (typeof ev.gamma === 'number') ? ev.gamma : null;
+
+    const hdg = computeHeadingFromDO(ev);
+    if (hdg != null) compassDeg = hdg;
+
+    const alpha = (ev.alpha ?? 0) * Math.PI/180;
+    const beta  = (ev.beta  ?? 0) * Math.PI/180;
+    const gamma = (ev.gamma ?? 0) * Math.PI/180;
+    setFromDeviceEuler(qDevice, alpha, beta, gamma, getScreenAngleRad());
+  };
+  const type = 'ondeviceorientationabsolute' in window ? 'deviceorientationabsolute' : 'deviceorientation';
+  window.addEventListener(type, doHandler, false);
+}
+
+// ──────────────────────── GPS ────────────────────────
+let geoWatchId = null;
+function startGPS() {
+  if (!('geolocation' in navigator)) {
+    dom.status.textContent = 'Geolocation not available.';
+    return;
+  }
+  if (!isSecure) {
+    dom.status.textContent = 'Needs HTTPS for geolocation & sensors.';
+    return;
+  }
+  try {
+    geoWatchId = navigator.geolocation.watchPosition(
+      (pos) => {
+        const c = pos.coords;
+        gps.have = true;
+        gps.lat = c.latitude;
+        gps.lon = c.longitude;
+        gps.alt = Number.isFinite(c.altitude) ? c.altitude : 0;
+        gps.acc = c.accuracy;
+        gps.heading = (c.heading != null && !Number.isNaN(c.heading)) ? norm360(c.heading) : gps.heading;
+        gps.speed = c.speed;
+
+        // Update surface position
+        surfacePosition.copy(latLonToCartesian(gps.lat, gps.lon, gps.alt));
+
+        // Place marker
+        marker.position.copy(surfacePosition.clone().setLength(EARTH_RADIUS_M));
+        marker.visible = true;
+
+        dom.gpsStatus.textContent = `${gps.lat.toFixed(6)}°, ${gps.lon.toFixed(6)}°`;
+        dom.latlon.textContent = `${gps.lat.toFixed(6)}°, ${gps.lon.toFixed(6)}°`;
+      },
+      (err) => {
+        dom.status.textContent = 'GPS error: ' + err.message;
+      },
+      { enableHighAccuracy: true, maximumAge: 1000, timeout: 10000 }
+    );
+  } catch (err) {
+    dom.status.textContent = 'Failed to start GPS: ' + err;
+  }
+}
+
+// ──────────────────────── Permissions ────────────────────────
+async function requestPermissions({allowCompassFallback=false}={}) {
+  if (!isSecure) {
+    permissionState = 'need HTTPS';
+    dom.status.textContent = permissionState;
+    return false;
+  }
+
+  async function requestIOS() {
+    let p1 = 'n/a', p2 = 'n/a';
+    try { if (DeviceMotionEvent?.requestPermission) p1 = await DeviceMotionEvent.requestPermission(); } catch {}
+    try { if (DeviceOrientationEvent?.requestPermission) p2 = await DeviceOrientationEvent.requestPermission(); } catch {}
+    permissionState = `${p1}/${p2}`;
+    dom.status.textContent = permissionState;
+    return (p1 === 'granted' || p2 === 'granted');
+  }
+  async function requestNonIOS() {
+    permissionState = 'requested';
+    dom.status.textContent = permissionState;
+    return true;
+  }
+
+  const ok = isiOS ? await requestIOS() : await requestNonIOS();
+  if (!ok && !allowCompassFallback) return false;
+
+  // Start sensors
+  let started = await tryStartAbsoluteSensor();
+  if (!started) startDeviceOrientation();
+
+  // Start GPS
+  startGPS();
+
+  // Keep overlay until heading lock
+  awaitingInitialHeading = true;
+  dom.status.textContent = 'Calibrating heading… hold steady (figure-8 if needed).';
+
+  return true;
+}
+
+// ──────────────────────── Compass Smoothing ────────────────────────
+function updateCompassSmoothing() {
+  if (compassDeg == null) return;
+  if (smoothedCompassDeg == null) {
+    smoothedCompassDeg = compassDeg;
+    return;
+  }
+  const alpha = 0.05;
+  const d = deltaDeg(compassDeg, smoothedCompassDeg);
+  smoothedCompassDeg = norm360(smoothedCompassDeg + d * alpha);
+}
+
+// Synthesize heading from gyro when no compass
+function synthesizeHeadingFromQuat() {
+  // In LOCAL ENU frame
+  const up = surfacePosition.clone().normalize();
+  const qUp = new THREE.Quaternion().setFromUnitVectors(Y_UP, up);
+  const qLocal = qUp.clone().invert().multiply(qDevice);
+  const yaw = yawFromQuaternion(qLocal);
+  compassDeg = norm360(THREE.MathUtils.radToDeg(yaw));
+}
+
+// ──────────────────────── Compass-First Alignment ────────────────────────
+function tryInitialAlign() {
+  if (initialAligned || smoothedCompassDeg == null) return;
+
+  // Compute device yaw in LOCAL ENU frame
+  const up = surfacePosition.clone().normalize();
+  const qUp = new THREE.Quaternion().setFromUnitVectors(Y_UP, up);
+  const qLocal = qUp.clone().invert().multiply(qDevice);
+  const gyYaw = yawFromQuaternion(qLocal);
+
+  const desiredYaw = smoothedCompassDeg * Math.PI/180;
+  const err = normPi(desiredYaw - gyYaw);
+  manualYawOffsetRad = err;
+
+  dom.aligned.textContent = 'yes';
+  initialAligned = true;
+}
+
+function maybeHideOverlayAfterAlign() {
+  if (awaitingInitialHeading && initialAligned) {
+    dom.overlay.classList.remove('show');
+    awaitingInitialHeading = false;
+    dom.status.textContent = '';
+  }
+}
+
+// ──────────────────────── Surface-Aligned Orientation Transform ────────────────────────
+// This is the KEY MATHEMATICAL TRANSFORMATION that maps phone orientation to globe surface
+function updateSurfaceCameraOrientation() {
+  if (!gps.have) return;
+
+  // 1. Get local "up" vector (surface normal at GPS position)
+  const up = surfacePosition.clone().normalize();
+
+  // 2. Apply yaw offset FIRST (in the phone's local space, just like orientation.html)
+  //    This is the compass-first alignment: qOffset * qDevice
+  qYawOffset.setFromAxisAngle(Y_UP, manualYawOffsetRad);
+  qFinal.copy(qDevice).premultiply(qYawOffset);  // qFinal = qOffset * qDevice
+
+  // 3. Now rotate the entire orientation to align with the surface normal
+  //    We need to rotate from world Y-up to the local surface normal
+  //    This is done by computing a quaternion that rotates Y_UP to 'up'
+  qLocalToWorld.setFromUnitVectors(Y_UP, up);
+
+  // 4. Apply the surface alignment: qWorld = qLocalToWorld * qFinal
+  cameraSurface.quaternion.copy(qFinal).premultiply(qLocalToWorld);
+
+  // 5. Position camera at eye height above surface
+  const eyeHeight = SURFACE_EYE_HEIGHT + (gps.alt > 0 ? gps.alt : 0);
+  cameraSurface.position.copy(up.multiplyScalar(EARTH_RADIUS_M + eyeHeight));
+  cameraSurface.up.copy(up);
+}
+
+// ──────────────────────── Update Heading Indicator ────────────────────────
+function updateHeadingIndicator() {
+  if (mode !== 'surface' || !gps.have) {
+    headingLine.visible = false;
+    return;
+  }
+
+  headingLine.visible = true;
+
+  // Get camera forward direction
+  const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(cameraSurface.quaternion);
+  const up = surfacePosition.clone().normalize();
+
+  // Project forward onto tangent plane
+  const tangentForward = forward.clone().sub(up.clone().multiplyScalar(forward.dot(up))).normalize();
+
+  // Create line from surface position outward
+  const start = up.clone().multiplyScalar(EARTH_RADIUS_M + 2000);
+  const lineLength = 300000; // 300 km
+  const end = start.clone().add(tangentForward.multiplyScalar(lineLength));
+
+  const pos = headingLine.geometry.attributes.position.array;
+  pos[0] = start.x; pos[1] = start.y; pos[2] = start.z;
+  pos[3] = end.x;   pos[4] = end.y;   pos[5] = end.z;
+  headingLine.geometry.attributes.position.needsUpdate = true;
+  headingLine.geometry.computeBoundingSphere();
+}
+
+// ──────────────────────── Mode Switching ────────────────────────
+function switchMode(newMode) {
+  mode = newMode;
+  dom.mode.textContent = mode;
+
+  if (mode === 'orbit') {
+    activeCamera = cameraOrbit;
+    orbitControls.enabled = true;
+    dom.btnOrbit.classList.add('active');
+    dom.btnSurface.classList.remove('active');
+  } else {
+    activeCamera = cameraSurface;
+    orbitControls.enabled = false;
+    dom.btnOrbit.classList.remove('active');
+    dom.btnSurface.classList.add('active');
+  }
+}
+
+dom.btnOrbit.addEventListener('click', () => switchMode('orbit'));
+dom.btnSurface.addEventListener('click', () => switchMode('surface'));
+
+// ──────────────────────── Recalibrate ────────────────────────
+dom.recalibrate.addEventListener('click', () => {
+  if (smoothedCompassDeg == null && compassDeg == null) return;
+  const heading = (smoothedCompassDeg != null) ? smoothedCompassDeg : compassDeg;
+
+  const up = surfacePosition.clone().normalize();
+  const qUp = new THREE.Quaternion().setFromUnitVectors(Y_UP, up);
+  const qLocal = qUp.clone().invert().multiply(qDevice);
+  const gyYaw = yawFromQuaternion(qLocal);
+  const desiredYaw = heading * Math.PI/180;
+
+  manualYawOffsetRad = normPi(desiredYaw - gyYaw);
+  dom.aligned.textContent = 'yes';
+});
+
+// ──────────────────────── Overlay UX ────────────────────────
+async function startWithPermissions() {
+  await requestPermissions();
+}
+async function startWithoutCompass() {
+  await requestPermissions({allowCompassFallback:true});
+}
+
+dom.enable.addEventListener('click', startWithPermissions);
+dom.continue.addEventListener('click', startWithoutCompass);
+
+// Auto-start on non-iOS
+if (!isiOS) {
+  requestPermissions().catch(()=>{});
+}
+
+// ──────────────────────── Render Loop ────────────────────────
+let then = performance.now(), frames = 0, fps = 0, fpsAccum = 0;
+
+function tick(now) {
+  const dt = Math.min(0.05, (now - then) / 1000);
+  then = now;
+
+  // Compass pipeline
+  if (!haveCompass && gps.heading == null) {
+    synthesizeHeadingFromQuat();
+  } else if (gps.heading != null && !haveCompass) {
+    compassDeg = gps.heading;
+  }
+  updateCompassSmoothing();
+  tryInitialAlign();
+  maybeHideOverlayAfterAlign();
+
+  // Update camera orientation (surface mode only)
+  if (mode === 'surface') {
+    updateSurfaceCameraOrientation();
+    updateHeadingIndicator();
+  }
+
+  // Update orbit controls
+  if (orbitControls.enabled) {
+    orbitControls.update();
+  }
+
+  // Render
+  renderer.render(scene, activeCamera);
+
+  // FPS counter
+  frames++;
+  fpsAccum += dt;
+  if (fpsAccum >= 0.5) {
+    fps = Math.round(frames / fpsAccum);
+    frames = 0;
+    fpsAccum = 0;
+    dom.fps.textContent = fps.toString();
+  }
+
+  // Update HUD
+  if (smoothedCompassDeg != null) {
+    dom.heading.textContent = smoothedCompassDeg.toFixed(1);
+  } else if (compassDeg != null) {
+    dom.heading.textContent = compassDeg.toFixed(1);
+  }
+
+  dom.pitch.textContent = (DO.beta ?? 0).toFixed(1);
+  dom.roll.textContent = (DO.gamma ?? 0).toFixed(1);
+
+  if (gps.have) {
+    const eyeHeight = SURFACE_EYE_HEIGHT + (gps.alt > 0 ? gps.alt : 0);
+    dom.altitude.textContent = eyeHeight.toFixed(1) + 'm';
+  }
+
+  requestAnimationFrame(tick);
+}
+requestAnimationFrame(tick);
+
+</script>
+</body>
+</html>
