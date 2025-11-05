@@ -50,6 +50,10 @@
     <button id="btnOrbit">Orbit</button>
     <button id="btnSurface" class="active">Surface</button>
     <div class="spacer"></div>
+    <label style="display:flex;align-items:center;gap:.5rem;cursor:pointer;">
+      <input type="checkbox" id="followGPS" checked />
+      <span>Follow GPS</span>
+    </label>
     <div class="pill">GPS: <span id="gpsStatus">—</span></div>
     <div class="pill">Compass: <span id="compassStatus">—</span></div>
     <button id="recalibrate">Recalibrate Heading</button>
@@ -94,6 +98,8 @@ const CAMERA_NEAR = 0.01;
 const CAMERA_FAR = EARTH_RADIUS_M * 100;
 const SURFACE_EYE_HEIGHT = 1.7;
 const ORBIT_START_DISTANCE = EARTH_RADIUS_M * 2.5;
+const ICOS_DETAIL = 6;
+const LON_OFFSET_DEG = -60; // Texture longitudinal offset to match computed lon
 
 const isSecure = location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
 const isiOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
@@ -108,6 +114,7 @@ const dom = {
   btnOrbit: document.getElementById('btnOrbit'),
   btnSurface: document.getElementById('btnSurface'),
   recalibrate: document.getElementById('recalibrate'),
+  followGPS: document.getElementById('followGPS'),
   mode: document.getElementById('mode'),
   latlon: document.getElementById('latlon'),
   heading: document.getElementById('heading'),
@@ -156,12 +163,26 @@ sun.position.set(5, 10, 7).multiplyScalar(EARTH_RADIUS_M * 2);
 scene.add(sun);
 
 // Globe
-const globeGeometry = new THREE.IcosahedronGeometry(EARTH_RADIUS_M, 6);
+function applyLonOffset(tex, deg) {
+  if (!tex) return;
+  tex.wrapS = THREE.RepeatWrapping;
+  if (tex.wrapT !== THREE.ClampToEdgeWrapping) tex.wrapT = THREE.ClampToEdgeWrapping;
+  const off = ((deg/360)%1+1)%1;
+  tex.offset.x = off;
+  tex.needsUpdate = true;
+}
+
+const globeGeometry = new THREE.IcosahedronGeometry(EARTH_RADIUS_M, ICOS_DETAIL);
 const loader = new THREE.TextureLoader();
+loader.setCrossOrigin('anonymous');
 const earthTexture = loader.load('2k_earth_daymap.jpg', (tex) => {
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
 });
+
+// Apply texture offset immediately (not in callback)
+applyLonOffset(earthTexture, LON_OFFSET_DEG);
+
 const globeMaterial = new THREE.MeshStandardMaterial({
   map: earthTexture,
   roughness: 1.0,
@@ -187,6 +208,10 @@ scene.add(headingLine);
 
 globe.frustumCulled = marker.frustumCulled = headingLine.frustumCulled = false;
 
+// Raycaster for clicking on globe
+const raycaster = new THREE.Raycaster();
+const pointer = new THREE.Vector2();
+
 function onResize() {
   const aspect = innerWidth / innerHeight;
   cameraOrbit.aspect = cameraSurface.aspect = aspect;
@@ -195,6 +220,48 @@ function onResize() {
   renderer.setSize(innerWidth, innerHeight);
 }
 addEventListener('resize', onResize);
+
+// ──────────────────────── Click to Place ────────────────────────
+renderer.domElement.addEventListener('click', (e) => {
+  // Get pointer coordinates
+  const rect = renderer.domElement.getBoundingClientRect();
+  pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+  pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+
+  // Raycast to globe
+  raycaster.setFromCamera(pointer, activeCamera);
+  const hits = raycaster.intersectObject(globe, false);
+
+  if (hits.length) {
+    const p = hits[0].point.clone().setLength(EARTH_RADIUS_M);
+    const latLon = cartesianToLatLon(p);
+
+    // Disable GPS following
+    followGPS = false;
+    dom.followGPS.checked = false;
+
+    // Update position (override real GPS)
+    gps.have = true;
+    gps.lat = latLon.latDeg;
+    gps.lon = latLon.lonDeg;
+    gps.alt = 0;
+
+    // Update surface position
+    surfacePosition.copy(p);
+
+    // Update marker
+    marker.position.copy(p);
+    marker.visible = true;
+
+    // Reset alignment for new location
+    initialAligned = false;
+    awaitingInitialHeading = false;
+    manualYawOffsetRad = 0;
+
+    dom.gpsStatus.textContent = `${gps.lat.toFixed(6)}°, ${gps.lon.toFixed(6)}° (manual)`;
+    dom.latlon.textContent = `${gps.lat.toFixed(6)}°, ${gps.lon.toFixed(6)}°`;
+  }
+});
 
 // ──────────────────────── Orientation System (from orientation.html) ────────────────────────
 const Y_UP = new THREE.Vector3(0,1,0);
@@ -252,6 +319,7 @@ let awaitingInitialHeading = false;
 let DO = { alpha: null, beta: null, gamma: null };
 
 // ──────────────────────── GPS State ────────────────────────
+let followGPS = true; // Follow real GPS or manual placement
 let gps = {
   have: false,
   lat: null,
@@ -262,6 +330,11 @@ let gps = {
   speed: null
 };
 let surfacePosition = new THREE.Vector3(1, 0, 0).multiplyScalar(EARTH_RADIUS_M); // default starting position
+
+// Follow GPS checkbox
+dom.followGPS.addEventListener('change', () => {
+  followGPS = dom.followGPS.checked;
+});
 
 // ──────────────────────── Math Helpers ────────────────────────
 const norm360 = d => (d % 360 + 360) % 360;
@@ -374,6 +447,8 @@ function startGPS() {
     geoWatchId = navigator.geolocation.watchPosition(
       (pos) => {
         const c = pos.coords;
+
+        // Always update GPS data
         gps.have = true;
         gps.lat = c.latitude;
         gps.lon = c.longitude;
@@ -382,15 +457,17 @@ function startGPS() {
         gps.heading = (c.heading != null && !Number.isNaN(c.heading)) ? norm360(c.heading) : gps.heading;
         gps.speed = c.speed;
 
-        // Update surface position
-        surfacePosition.copy(latLonToCartesian(gps.lat, gps.lon, gps.alt));
+        // Only update position if following GPS
+        if (followGPS) {
+          surfacePosition.copy(latLonToCartesian(gps.lat, gps.lon, gps.alt));
+          marker.position.copy(surfacePosition.clone().setLength(EARTH_RADIUS_M));
+          marker.visible = true;
+        }
 
-        // Place marker
-        marker.position.copy(surfacePosition.clone().setLength(EARTH_RADIUS_M));
-        marker.visible = true;
-
-        dom.gpsStatus.textContent = `${gps.lat.toFixed(6)}°, ${gps.lon.toFixed(6)}°`;
-        dom.latlon.textContent = `${gps.lat.toFixed(6)}°, ${gps.lon.toFixed(6)}°`;
+        dom.gpsStatus.textContent = `${gps.lat.toFixed(6)}°, ${gps.lon.toFixed(6)}° ${followGPS ? '' : '(not following)'}`;
+        if (followGPS) {
+          dom.latlon.textContent = `${gps.lat.toFixed(6)}°, ${gps.lon.toFixed(6)}°`;
+        }
       },
       (err) => {
         dom.status.textContent = 'GPS error: ' + err.message;
