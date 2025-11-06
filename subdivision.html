@@ -103,7 +103,7 @@ const CAMERA_NEAR = 0.01;
 const CAMERA_FAR = EARTH_RADIUS_M * 100;
 const SURFACE_EYE_HEIGHT = 1.7;
 const ORBIT_START_DISTANCE = EARTH_RADIUS_M * 2.5;
-const ICOS_DETAIL = 2; // Reduced from 6 - fewer base faces before subdivision
+const ICOS_DETAIL = 6; // Reduced from 6 - fewer base faces before subdivision
 const LON_OFFSET_DEG = -60;
 const isSecure = location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
 const isiOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
@@ -274,7 +274,8 @@ const globeMaterial = new THREE.MeshStandardMaterial({
   map: earthTexture,
   roughness: 1.0,
   metalness: 0.0,
-  wireframe: false  // Show subdivision wireframe
+  wireframe: false,  // Show subdivision wireframe
+  side: THREE.DoubleSide
 });
 const globe = new THREE.Mesh(globeGeometry, globeMaterial);
 scene.add(globe);
@@ -783,8 +784,8 @@ function updateSurfaceWalking(dt) {
 
   // Input direction
   const dir = new THREE.Vector3();
-  if (keys.has('ArrowUp') || keys.has('KeyW')) dir.add(tangentForward);
-  if (keys.has('ArrowDown') || keys.has('KeyS')) dir.sub(tangentForward);
+  if (keys.has('ArrowUp') || keys.has('KeyW')) dir.sub(tangentForward);
+  if (keys.has('ArrowDown') || keys.has('KeyS')) dir.add(tangentForward);
   if (keys.has('ArrowLeft') || keys.has('KeyA')) dir.add(right);
   if (keys.has('ArrowRight') || keys.has('KeyD')) dir.sub(right);
 
@@ -1084,6 +1085,30 @@ focusRayLine.visible = false;
 focusRayLine.renderOrder = 5;
 scene.add(focusRayLine);
 
+function ensureVertexMetadata(idx) {
+  if (idx == null) return null;
+  let data = subdividedGeometry.vertexData.get(idx);
+  if (data) return data;
+
+  const origin = subdividedGeometry.originalVertices[idx] || subdividedGeometry.vertices[idx];
+  if (!origin) return null;
+
+  const { latDeg, lonDeg } = cartesianToLatLon(origin);
+  const lat = Number(latDeg.toFixed(6));
+  const lon = Number(lonDeg.toFixed(6));
+  const geohash = geohashEncode(lat, lon, 9);
+
+  data = {
+    lat,
+    lon,
+    geohash,
+    elevation: null,
+    fetching: false
+  };
+  subdividedGeometry.vertexData.set(idx, data);
+  return data;
+}
+
 function updateFocusIndicators(point) {
   if (!focusRay || !focusRayGeometry || !focusRayLine) {
     return;
@@ -1226,6 +1251,7 @@ function getMidpointVertex(v1Idx, v2Idx) {
   const v_coord = 0.5 + Math.asin(normalized.y) / Math.PI;
   subdividedGeometry.uvCoords.push([u, v_coord]);
 
+  ensureVertexMetadata(newIdx);
   subdividedGeometry.edgeCache.set(key, newIdx);
 
   return newIdx;
@@ -1650,10 +1676,17 @@ function updateGlobeMesh() {
   globeGeometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
   globeGeometry.setIndex(new THREE.BufferAttribute(indices, 1));
   globeGeometry.computeVertexNormals();
+  globeGeometry.computeBoundingSphere();
+  globeGeometry.computeBoundingBox();
   globeGeometry.attributes.position.needsUpdate = true;
   globeGeometry.attributes.uv.needsUpdate = true;
+  if (globeGeometry.attributes.normal) {
+    globeGeometry.attributes.normal.needsUpdate = true;
+  }
   globeGeometry.index.needsUpdate = true;
   globeGeometry.userData.faceBaseIndex = subdividedGeometry.faceBaseIndex.slice();
+  if (globe.material) globe.material.needsUpdate = true;
+  if (globeMaterial) globeMaterial.needsUpdate = true;
 
   // Update wireframe - draw ALL edges to show subdivision structure
   const wireframePositions = new Float32Array(faces.length * 6 * 3); // 3 edges per face, 2 verts per edge, 3 coords
@@ -1700,35 +1733,81 @@ async function fetchVertexElevation(vertexIndices, runId) {
   if (!nknClient || !settings.nknRelay || vertexIndices.length === 0) return;
   if (runId !== currentRegenerationRunId) return;
 
-  // Get lat/lon for each vertex
   const requests = [];
-  for (let idx of vertexIndices) {
-    if (runId !== currentRegenerationRunId || cancelRegeneration) return;
-    const v = subdividedGeometry.vertices[idx];
-    if (v) {
-      const latLon = cartesianToLatLon(v);
-      if (!subdividedGeometry.vertexData.has(idx)) {
-        subdividedGeometry.vertexData.set(idx, {lat: latLon.latDeg, lon: latLon.lonDeg, elevation: null});
+  const ghToEntries = new Map();
+  const latLonToEntries = new Map();
+
+  const ghPrec = 9;
+
+  const resetPending = () => {
+    for (const entry of requests) {
+      if (entry?.meta) {
+        entry.meta.fetching = false;
       }
-      requests.push({idx, lat: latLon.latDeg, lon: latLon.lonDeg});
     }
+  };
+
+  for (const idx of vertexIndices) {
+    if (runId !== currentRegenerationRunId || cancelRegeneration) {
+      resetPending();
+      return;
+    }
+    const meta = ensureVertexMetadata(idx);
+    if (!meta) continue;
+    if (meta.fetching) continue;
+    if (meta.elevation != null) continue;
+
+    meta.fetching = true;
+
+    const lat = meta.lat;
+    const lon = meta.lon;
+    const geohash = meta.geohash || geohashEncode(lat, lon, ghPrec);
+    meta.geohash = geohash;
+
+    requests.push({ idx, meta, lat, lon, geohash });
+
+    if (!ghToEntries.has(geohash)) ghToEntries.set(geohash, []);
+    ghToEntries.get(geohash).push({ idx, meta });
+
+    const key = `${lat.toFixed(6)},${lon.toFixed(6)}`;
+    if (!latLonToEntries.has(key)) latLonToEntries.set(key, []);
+    latLonToEntries.get(key).push({ idx, meta });
   }
 
-  // Determine geohash precision based on vertex density
-  const ghPrec = 9;
-  const geohashes = requests.map(r => geohashEncode(r.lat, r.lon, ghPrec));
+  if (requests.length === 0) return;
 
   const req = {
     type: 'elev.query',
     dataset: settings.dataset,
-    geohashes,
+    geohashes: requests.map(r => r.geohash),
     enc: 'geohash',
     prec: ghPrec
   };
 
+  const markComplete = (entry, height) => {
+    const { idx, meta } = entry;
+    if (!meta) return;
+    meta.fetching = false;
+    if (!Number.isFinite(height)) return;
+    meta.elevation = height;
+
+    const originalPos = subdividedGeometry.originalVertices[idx];
+    if (!originalPos) return;
+    const radialDir = originalPos.clone().normalize();
+
+    subdividedGeometry.vertices[idx].copy(originalPos).add(
+      radialDir.multiplyScalar(height * settings.elevExag)
+    );
+
+    updateVertexMarkerColor(idx, true);
+  };
+
   try {
     const resp = await sendWithReply(settings.nknRelay, req, 30000);
-    if (runId !== currentRegenerationRunId || cancelRegeneration) return;
+    if (runId !== currentRegenerationRunId || cancelRegeneration) {
+      resetPending();
+      return;
+    }
 
     let json = null;
     if (resp.body_b64) {
@@ -1737,42 +1816,152 @@ async function fetchVertexElevation(vertexIndices, runId) {
       json = (typeof resp.body === 'string') ? JSON.parse(resp.body) : resp.body;
     }
 
-    if (json && Array.isArray(json.results)) {
-      if (runId !== currentRegenerationRunId || cancelRegeneration) return;
-      const ghToReq = new Map();
-      requests.forEach(r => {
-        ghToReq.set(geohashEncode(r.lat, r.lon, ghPrec), r);
-      });
+    let updated = false;
 
-      json.results.forEach(r => {
+    const applyHeightToEntries = (entries, height) => {
+      if (!entries || !entries.length) return;
+      for (const entry of entries) {
         if (runId !== currentRegenerationRunId || cancelRegeneration) return;
-        if (r.geohash && r.elevation != null) {
-          const req = ghToReq.get(r.geohash);
-          if (req) {
-            const data = subdividedGeometry.vertexData.get(req.idx);
-            if (data) {
-              data.elevation = r.elevation;
+        markComplete(entry, height);
+        updated = true;
+      }
+    };
 
-              // Apply elevation to vertex using ORIGINAL position for radial direction
-              const originalPos = subdividedGeometry.originalVertices[req.idx];
-              const radialDir = originalPos.clone().normalize();
+    const extractHeight = (result) => {
+      if (!result) return null;
+      const value =
+        result.elev ??
+        result.elevation ??
+        result.height ??
+        result.value ??
+        result.z ??
+        result.h ??
+        result.d ??
+        result.v;
+      if (Number.isFinite(value)) return Number(value);
+      return null;
+    };
 
-              // Set new position = original + (elevation * radial direction)
-              subdividedGeometry.vertices[req.idx].copy(originalPos).add(
-                radialDir.multiplyScalar(r.elevation * settings.elevExag)
-              );
+    if (json && Array.isArray(json.results)) {
+      if (runId !== currentRegenerationRunId || cancelRegeneration) {
+        resetPending();
+        return;
+      }
 
-              // Turn marker green
-              updateVertexMarkerColor(req.idx, true);
+      for (const res of json.results) {
+        if (runId !== currentRegenerationRunId || cancelRegeneration) {
+          resetPending();
+          return;
+        }
+        const height = extractHeight(res);
+        if (!Number.isFinite(height)) continue;
+
+        let matched = false;
+
+        const hashKey = res?.geohash || res?.hash || res?.key;
+        if (hashKey && ghToEntries.has(hashKey)) {
+          applyHeightToEntries(ghToEntries.get(hashKey), height);
+          matched = true;
+        }
+
+        const loc = res?.location || res?.loc;
+        if (!matched && loc) {
+          const lat = Number(loc.lat ?? loc.latitude ?? loc[0]);
+          const lon = Number(loc.lon ?? loc.lng ?? loc.longitude ?? loc[1]);
+          if (Number.isFinite(lat) && Number.isFinite(lon)) {
+            const key = `${lat.toFixed(6)},${lon.toFixed(6)}`;
+            if (latLonToEntries.has(key)) {
+              applyHeightToEntries(latLonToEntries.get(key), height);
+              matched = true;
             }
           }
         }
-      });
 
-      // Note: Don't call updateGlobeMesh() here - it will be called once after all batches complete
+        if (!matched && res?.geohashes && Array.isArray(res.geohashes) && Array.isArray(res.elevations)) {
+          for (let i = 0; i < res.geohashes.length; i++) {
+            const gh = res.geohashes[i];
+            const h = Number(res.elevations[i]);
+            if (!Number.isFinite(h)) continue;
+            applyHeightToEntries(ghToEntries.get(gh), h);
+          }
+          matched = true;
+        }
+
+        if (!matched && res?.values && Array.isArray(res.values)) {
+          const ghList = res.geohashes || res.hashes || res.keys;
+          if (Array.isArray(ghList) && ghList.length === res.values.length) {
+            for (let i = 0; i < ghList.length; i++) {
+              const gh = ghList[i];
+              const h = Number(res.values[i]);
+              if (!Number.isFinite(h)) continue;
+              applyHeightToEntries(ghToEntries.get(gh), h);
+            }
+          }
+        }
+      }
+    }
+
+    if (!updated && json) {
+      const ghList = json.geohashes || json.hashes || json.keys;
+      const values = json.elevations || json.heights || json.values;
+      if (Array.isArray(ghList) && Array.isArray(values) && ghList.length === values.length) {
+        for (let i = 0; i < ghList.length; i++) {
+          const gh = ghList[i];
+          const h = Number(values[i]);
+          if (!Number.isFinite(h)) continue;
+          applyHeightToEntries(ghToEntries.get(gh), h);
+        }
+      }
+
+      const samples = json.samples;
+      if (Array.isArray(samples)) {
+        for (const sample of samples) {
+          const height = extractHeight(sample);
+          if (!Number.isFinite(height)) continue;
+          let handled = false;
+          if (sample.geohash && ghToEntries.has(sample.geohash)) {
+            applyHeightToEntries(ghToEntries.get(sample.geohash), height);
+            handled = true;
+          }
+          if (!handled && sample.location) {
+            const lat = Number(sample.location.lat ?? sample.location.latitude);
+            const lon = Number(sample.location.lon ?? sample.location.lng ?? sample.location.longitude);
+            if (Number.isFinite(lat) && Number.isFinite(lon)) {
+              const key = `${lat.toFixed(6)},${lon.toFixed(6)}`;
+              applyHeightToEntries(latLonToEntries.get(key), height);
+            }
+          }
+        }
+      }
+    }
+
+    if (Array.isArray(json?.results)) {
+      const minLen = Math.min(requests.length, json.results.length);
+      for (let i = 0; i < minLen; i++) {
+        const entry = requests[i];
+        if (!entry || !entry.meta) continue;
+        if (entry.meta.elevation != null) continue;
+        const res = json.results[i];
+        const height = extractHeight(res);
+        if (!Number.isFinite(height)) continue;
+        markComplete(entry, height);
+        updated = true;
+      }
+    }
+
+    if (updated) {
+      updateGlobeMesh();
     }
   } catch (err) {
     console.error('Elevation fetch error:', err);
+    resetPending();
+    return;
+  }
+
+  for (const { meta } of requests) {
+    if (meta && meta.fetching) {
+      meta.fetching = false;
+    }
   }
 }
 
@@ -1820,9 +2009,12 @@ async function regenerateTerrain() {
       // Collect new vertices that need elevation data
       const collectStart = performance.now();
       const newVertices = [];
-      for (let i = baseIcosahedron.vertices.length; i < subdividedGeometry.vertices.length; i++) {
+      for (let i = 0; i < subdividedGeometry.vertices.length; i++) {
         if (cancelRegeneration) break;
-        if (!subdividedGeometry.vertexData.has(i)) {
+        const meta = ensureVertexMetadata(i);
+        if (!meta) continue;
+        if (meta.fetching) continue;
+        if (meta.elevation == null) {
           newVertices.push(i);
         }
       }
