@@ -39,6 +39,7 @@ button.active{background:#4b93ff;color:#fff}
 #settingsModal .value-display{padding:.4rem .8rem;border:1px solid #2a344a;border-radius:6px;background:#101525;min-width:80px;text-align:center}
 #settingsModal .btn-row{display:flex;gap:.5rem;margin-top:1.5rem}
 #settingsModal button{flex:1}
+#settingsModal .setting-note{font-size:.75rem;opacity:.75;margin:-.35rem 0 .85rem;line-height:1.4}
 .gear-btn{position:fixed;top:1rem;right:1rem;z-index:6;width:3rem;height:3rem;border-radius:50%;display:grid;place-items:center;background:#1a2332;border:1px solid #2a344a;cursor:pointer;font-size:1.5rem;transition:.2s}
 .gear-btn:hover{background:#243448;transform:rotate(90deg)}
 </style>
@@ -71,16 +72,19 @@ button.active{background:#4b93ff;color:#fff}
 <h3>Terrain Settings</h3>
 <label>NKN Relay</label><input id="nknRelay" type="text" value="forwarder.4658c990865d63ad367a3f9e26203df9ad544f9d58ef27668db4f3ebc570eb5f" />
 <label>Dataset</label><input id="dataset" type="text" value="mapzen" />
-<label>Max Radius (m)</label>
+<label title="Area that keeps the tightest triangles around your focus point.">High Detail Radius (m)</label>
+<div class="slider-row"><input id="fineRadius" type="range" min="500" max="20000" step="100" value="4000" /><div class="value-display"><span id="fineRadiusVal">4000</span> m</div></div>
+<div class="setting-note">Triangles inside this distance subdivide all the way down to the minimum edge length.</div>
+<label title="How far the mesh ramps from 1 m triangles back to coarse terrain.">Detail Falloff Distance (m)</label>
+<div class="slider-row"><input id="fineFalloff" type="range" min="0" max="20000" step="100" value="6000" /><div class="value-display"><span id="fineFalloffVal">6000</span> m</div></div>
+<div class="setting-note">Outside the high detail radius, this buffer eases into your coarse terrain size.</div>
+<label title="Smallest triangle edge we try to reach inside the detailed zone.">Minimum Edge Length (m)</label>
+<div class="slider-row"><input id="minEdge" type="range" min="0.5" max="20" step="0.5" value="1" /><div class="value-display"><span id="minEdgeVal">1</span> m</div></div>
+<div class="setting-note">Use this to control the finest resolution available right under the camera.</div>
+<label>Maximum Radius (m)</label>
 <div class="slider-row"><input id="maxRadius" type="range" min="1000" max="200000" step="1000" value="50000" /><div class="value-display"><span id="maxRadiusVal">50000</span> m</div></div>
-<label>Tile Size (m)</label>
-<div class="slider-row"><input id="tileSize" type="range" min="100" max="10000" step="100" value="2000" /><div class="value-display"><span id="tileSizeVal">2000</span> m</div></div>
-<label>Grid Resolution</label>
-<div class="slider-row"><input id="gridRes" type="range" min="8" max="128" step="8" value="32" /><div class="value-display"><span id="gridResVal">32</span></div></div>
 <label>Elevation Exaggeration</label>
 <div class="slider-row"><input id="elevExag" type="range" min="0.1" max="5" step="0.1" value="1.0" /><div class="value-display"><span id="elevExagVal">1.0</span>x</div></div>
-<label>LOD Distance Mult</label>
-<div class="slider-row"><input id="lodMult" type="range" min="1" max="10" step="0.5" value="3" /><div class="value-display"><span id="lodMultVal">3</span>x</div></div>
 <div class="btn-row"><button id="applySettings">Apply & Regenerate</button><button id="closeSettings" style="background:#2a344a">Close</button></div>
 </div>
 </div>
@@ -117,12 +121,11 @@ let settings = {
   nknRelay: 'forwarder.4658c990865d63ad367a3f9e26203df9ad544f9d58ef27668db4f3ebc570eb5f',
   dataset: 'mapzen',
   maxRadius: 50000,
-  tileSize: 2000,
-  gridRes: 32,
+  fineDetailRadius: 4000,
+  fineDetailFalloff: 6000,
   elevExag: 1.0,
-  lodMult: 3,
-  minSpacingM: 5,     // Minimum edge size at character position (5 meters - reduced from 1m for performance)
-  maxSpacingM: 5000,  // Maximum spacing at outer edge (meters) - large triangles far away
+  minSpacingM: 1,     // Minimum edge size within fine detail radius (meters)
+  maxSpacingM: 5000,  // Maximum spacing at outer edge (meters)
   maxVertices: 50000  // Maximum vertices before stopping subdivision (performance limit)
 };
 
@@ -131,6 +134,12 @@ function loadSettings() {
   if (stored) {
     try { Object.assign(settings, JSON.parse(stored)); } catch {}
   }
+  if (!Number.isFinite(settings.maxRadius)) settings.maxRadius = 50000;
+  if (!Number.isFinite(settings.fineDetailRadius)) settings.fineDetailRadius = 4000;
+  if (!Number.isFinite(settings.fineDetailFalloff)) settings.fineDetailFalloff = 6000;
+  if (!Number.isFinite(settings.minSpacingM)) settings.minSpacingM = 1;
+  if (!Number.isFinite(settings.maxSpacingM) || settings.maxSpacingM < settings.minSpacingM) settings.maxSpacingM = 5000;
+  if (!Number.isFinite(settings.elevExag)) settings.elevExag = 1.0;
 }
 
 function saveSettings() {
@@ -163,14 +172,14 @@ const dom = {
   dataset: document.getElementById('dataset'),
   maxRadius: document.getElementById('maxRadius'),
   maxRadiusVal: document.getElementById('maxRadiusVal'),
-  tileSize: document.getElementById('tileSize'),
-  tileSizeVal: document.getElementById('tileSizeVal'),
-  gridRes: document.getElementById('gridRes'),
-  gridResVal: document.getElementById('gridResVal'),
+  fineRadius: document.getElementById('fineRadius'),
+  fineRadiusVal: document.getElementById('fineRadiusVal'),
+  fineFalloff: document.getElementById('fineFalloff'),
+  fineFalloffVal: document.getElementById('fineFalloffVal'),
+  minEdge: document.getElementById('minEdge'),
+  minEdgeVal: document.getElementById('minEdgeVal'),
   elevExag: document.getElementById('elevExag'),
   elevExagVal: document.getElementById('elevExagVal'),
-  lodMult: document.getElementById('lodMult'),
-  lodMultVal: document.getElementById('lodMultVal'),
   applySettings: document.getElementById('applySettings'),
   closeSettings: document.getElementById('closeSettings')
 };
@@ -179,24 +188,24 @@ function syncSettingsUI() {
   dom.nknRelay.value = settings.nknRelay;
   dom.dataset.value = settings.dataset;
   dom.maxRadius.value = settings.maxRadius;
-  dom.maxRadiusVal.textContent = settings.maxRadius;
-  dom.tileSize.value = settings.tileSize;
-  dom.tileSizeVal.textContent = settings.tileSize;
-  dom.gridRes.value = settings.gridRes;
-  dom.gridResVal.textContent = settings.gridRes;
+  dom.maxRadiusVal.textContent = Math.round(settings.maxRadius);
+  dom.fineRadius.value = settings.fineDetailRadius;
+  dom.fineRadiusVal.textContent = Math.round(settings.fineDetailRadius);
+  dom.fineFalloff.value = settings.fineDetailFalloff;
+  dom.fineFalloffVal.textContent = Math.round(settings.fineDetailFalloff);
+  dom.minEdge.value = settings.minSpacingM;
+  dom.minEdgeVal.textContent = Number(settings.minSpacingM.toFixed(2));
   dom.elevExag.value = settings.elevExag;
-  dom.elevExagVal.textContent = settings.elevExag;
-  dom.lodMult.value = settings.lodMult;
-  dom.lodMultVal.textContent = settings.lodMult;
+  dom.elevExagVal.textContent = settings.elevExag.toFixed(1);
 }
 
 syncSettingsUI();
 
-dom.maxRadius.addEventListener('input', () => dom.maxRadiusVal.textContent = dom.maxRadius.value);
-dom.tileSize.addEventListener('input', () => dom.tileSizeVal.textContent = dom.tileSize.value);
-dom.gridRes.addEventListener('input', () => dom.gridResVal.textContent = dom.gridRes.value);
-dom.elevExag.addEventListener('input', () => dom.elevExagVal.textContent = dom.elevExag.value);
-dom.lodMult.addEventListener('input', () => dom.lodMultVal.textContent = dom.lodMult.value);
+dom.maxRadius.addEventListener('input', () => dom.maxRadiusVal.textContent = Math.round(parseFloat(dom.maxRadius.value)));
+dom.fineRadius.addEventListener('input', () => dom.fineRadiusVal.textContent = Math.round(parseFloat(dom.fineRadius.value)));
+dom.fineFalloff.addEventListener('input', () => dom.fineFalloffVal.textContent = Math.round(parseFloat(dom.fineFalloff.value)));
+dom.minEdge.addEventListener('input', () => dom.minEdgeVal.textContent = Number(parseFloat(dom.minEdge.value).toFixed(2)));
+dom.elevExag.addEventListener('input', () => dom.elevExagVal.textContent = parseFloat(dom.elevExag.value).toFixed(1));
 
 dom.gearBtn.addEventListener('click', () => dom.settingsModal.classList.add('show'));
 dom.closeSettings.addEventListener('click', () => dom.settingsModal.classList.remove('show'));
@@ -204,12 +213,18 @@ dom.closeSettings.addEventListener('click', () => dom.settingsModal.classList.re
 dom.applySettings.addEventListener('click', () => {
   settings.nknRelay = dom.nknRelay.value.trim();
   settings.dataset = dom.dataset.value.trim();
-  settings.maxRadius = parseFloat(dom.maxRadius.value);
-  settings.tileSize = parseFloat(dom.tileSize.value);
-  settings.gridRes = parseInt(dom.gridRes.value);
-  settings.elevExag = parseFloat(dom.elevExag.value);
-  settings.lodMult = parseFloat(dom.lodMult.value);
+  const maxRadiusValue = parseFloat(dom.maxRadius.value);
+  settings.maxRadius = Number.isFinite(maxRadiusValue) ? Math.max(1000, maxRadiusValue) : 50000;
+  const fineRadiusValue = parseFloat(dom.fineRadius.value);
+  settings.fineDetailRadius = Number.isFinite(fineRadiusValue) ? Math.max(0, fineRadiusValue) : 4000;
+  const fineFalloffValue = parseFloat(dom.fineFalloff.value);
+  settings.fineDetailFalloff = Number.isFinite(fineFalloffValue) ? Math.max(0, fineFalloffValue) : 6000;
+  const minEdgeValue = parseFloat(dom.minEdge.value);
+  settings.minSpacingM = Number.isFinite(minEdgeValue) ? Math.max(0.1, minEdgeValue) : 1;
+  const elevValue = parseFloat(dom.elevExag.value);
+  settings.elevExag = Number.isFinite(elevValue) ? Math.max(0.1, elevValue) : 1.0;
   saveSettings();
+  syncSettingsUI();
   dom.settingsModal.classList.remove('show');
   regenerateTerrain();
 });
@@ -1281,6 +1296,18 @@ function distanceToCharacter(vertex) {
   return angle * EARTH_RADIUS_M; // Arc length = angle * radius
 }
 
+function surfaceDistanceBetween(a, b) {
+  const v1 = a.clone().normalize();
+  const v2 = b.clone().normalize();
+  const angle = Math.acos(THREE.MathUtils.clamp(v1.dot(v2), -1, 1));
+  return angle * EARTH_RADIUS_M;
+}
+
+function distanceToFocusPoint(vertex) {
+  if (!focusedPoint) return distanceToCharacter(vertex);
+  return surfaceDistanceBetween(vertex, focusedPoint);
+}
+
 function findClosestBaseFaceIndex() {
   let closestIndex = 0;
   let closestDist = Infinity;
@@ -1369,7 +1396,6 @@ function updateFocusedFaceBary(faceIndex, point) {
 
 // Check if a triangle should be subdivided based on focus ray intersection
 function shouldSubdivideTriangle(triangle, baseFaceIndex, focusPathActive, distanceToFocus = null) {
-  if (!focusPathActive) return false;
   if (focusedBaseFaceIndex != null && baseFaceIndex !== focusedBaseFaceIndex) {
     return false;
   }
@@ -1383,15 +1409,37 @@ function shouldSubdivideTriangle(triangle, baseFaceIndex, focusPathActive, dista
   const edge3 = v3.distanceTo(v1);
   const maxEdge = Math.max(edge1, edge2, edge3);
 
-  if (distanceToFocus != null) {
-    const maxDist = settings.maxRadius;
-    const normalizedDist = Math.min(Math.max(distanceToFocus, 0) / Math.max(maxDist, 1e-6), 1.0);
-    const t = Math.pow(normalizedDist, 3);
-    const targetEdgeSize = settings.minSpacingM + (settings.maxSpacingM - settings.minSpacingM) * t;
-    return maxEdge > targetEdgeSize;
+  const center = tmpCenter.copy(v1).add(v2).add(v3).multiplyScalar(1 / 3);
+  const distToFocus = Number.isFinite(distanceToFocus)
+    ? distanceToFocus
+    : distanceToFocusPoint(center);
+
+  const approxRadius = maxEdge * 0.5;
+  const effectiveDist = Math.max(0, distToFocus - approxRadius);
+
+  const maxRadius = Math.max(settings.maxRadius, 1);
+  if (!Number.isFinite(distToFocus) || effectiveDist > maxRadius) {
+    return false;
   }
 
-  return maxEdge > settings.minSpacingM;
+  const minEdge = Math.max(settings.minSpacingM, 0.1);
+  const maxEdgeAllowed = Math.max(settings.maxSpacingM, minEdge);
+  const fineRadius = Math.max(settings.fineDetailRadius, 0);
+
+  let targetEdge = maxEdgeAllowed;
+
+  if (focusPathActive || effectiveDist <= fineRadius) {
+    targetEdge = minEdge;
+  } else {
+    const falloff = Math.max(settings.fineDetailFalloff, 1);
+    const t = Math.min((effectiveDist - fineRadius) / falloff, 1);
+    const smooth = t * t * (3 - 2 * t); // smoothstep easing
+    const farNorm = Math.min(distToFocus / maxRadius, 1);
+    const farTarget = minEdge + (maxEdgeAllowed - minEdge) * farNorm;
+    targetEdge = THREE.MathUtils.lerp(minEdge, farTarget, smooth);
+  }
+
+  return maxEdge > targetEdge;
 }
 
 // Rebuild globe geometry with adaptive subdivision
@@ -1536,16 +1584,17 @@ function subdivideTriangleCascading(triangle, depth, baseFaceIndex, focusData) {
   const ray = focusData?.ray || null;
   let rayHits = false;
   let focusDistanceToCenter = null;
+  const centerDistanceToFocus = distanceToFocusPoint(center);
 
   if (ray) {
     const hit = ray.intersectTriangle(v1, v2, v3, false, tmpRayHit);
     if (hit) {
       rayHits = true;
-      focusDistanceToCenter = center.distanceTo(tmpRayHit);
+      focusDistanceToCenter = centerDistanceToFocus;
     }
   }
 
-  if (!shouldSubdivideTriangle(triangle, baseFaceIndex, rayHits, focusDistanceToCenter)) {
+  if (!shouldSubdivideTriangle(triangle, baseFaceIndex, rayHits, focusDistanceToCenter ?? centerDistanceToFocus)) {
     subdividedGeometry.faces.push(triangle);
     subdividedGeometry.faceBaseIndex.push(baseFaceIndex);
 
@@ -1793,11 +1842,10 @@ async function fetchVertexElevation(vertexIndices, runId) {
 
     const originalPos = subdividedGeometry.originalVertices[idx];
     if (!originalPos) return;
+    const baseRadius = originalPos.length();
     const radialDir = originalPos.clone().normalize();
-
-    subdividedGeometry.vertices[idx].copy(originalPos).add(
-      radialDir.multiplyScalar(height * settings.elevExag)
-    );
+    const targetRadius = baseRadius + height * settings.elevExag;
+    subdividedGeometry.vertices[idx].copy(radialDir.multiplyScalar(targetRadius));
 
     updateVertexMarkerColor(idx, true);
   };
