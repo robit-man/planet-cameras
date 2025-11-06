@@ -1,0 +1,2338 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<title>Terrain Gen - Production Cesium-like Adaptive Terrain</title>
+<script src="https://cdn.jsdelivr.net/gh/nknorg/nkn-sdk-js/dist/nkn.min.js"></script>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.162.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.162.0/examples/jsm/"
+  }
+}
+</script>
+<style>
+html,body{margin:0;height:100%;background:#0b0d12;color:#dfe6ee;font-family:system-ui,sans-serif;overflow:hidden}
+#app{position:fixed;inset:0;display:grid;grid-template-rows:auto 1fr auto}
+canvas{display:block}
+#header{display:flex;gap:.75rem;flex-wrap:wrap;align-items:center;padding:.5rem .75rem;background:linear-gradient(180deg,#0b0d12 0,#0b0d12dd 60%,#0b0d12 100%);border-bottom:1px solid #182031;font-size:.9rem;position:relative;z-index:5}
+#hud{display:flex;gap:.75rem;flex-wrap:wrap;align-items:center;padding:.5rem .75rem;background:linear-gradient(180deg,#0b0d12 0,#0b0d12dd 60%,#0b0d12 100%);border-top:1px solid #182031;font-size:.9rem;max-height:40vh;overflow-y:auto}
+.pill{padding:.25rem .5rem;border:1px solid #2a344a;border-radius:8px;background:#101525;white-space:nowrap}
+button{appearance:none;border:none;cursor:pointer;font-weight:600;padding:.6rem .9rem;border-radius:10px;color:#0b0d12;background:#8bd1ff;white-space:nowrap}
+button:active{transform:translateY(1px)}
+button.active{background:#4b93ff;color:#fff}
+.spacer{flex:1}
+#overlay{position:fixed;inset:0;display:none;place-items:center;background:#0b0d12f2;z-index:10}
+#overlay.show{display:grid}
+#overlay .card{max-width:520px;padding:1rem 1.25rem;border:1px solid #263149;border-radius:12px;background:#0d1220;box-shadow:0 8px 30px rgba(0,0,0,.35)}
+.small{font-size:.8rem;opacity:.8}
+#settingsModal{position:fixed;inset:0;display:none;place-items:center;background:rgba(11,13,18,.85);z-index:20;backdrop-filter:blur(4px)}
+#settingsModal.show{display:grid}
+#settingsModal .modal-content{max-width:600px;width:90%;max-height:85vh;overflow-y:auto;padding:1.5rem;border:1px solid #263149;border-radius:16px;background:#0d1220;box-shadow:0 20px 60px rgba(0,0,0,.5)}
+#settingsModal h3{margin:0 0 1rem;font-size:1.2rem}
+#settingsModal label{display:block;margin:1rem 0 .5rem;font-weight:600;color:#dfe6ee}
+#settingsModal input[type=text],#settingsModal input[type=number]{width:100%;padding:.6rem;border-radius:8px;border:1px solid #2a344a;background:#101525;color:#dfe6ee}
+#settingsModal .slider-row{display:grid;grid-template-columns:1fr auto;gap:1rem;align-items:center;margin:.5rem 0}
+#settingsModal input[type=range]{width:100%}
+#settingsModal .value-display{padding:.4rem .8rem;border:1px solid #2a344a;border-radius:6px;background:#101525;min-width:80px;text-align:center}
+#settingsModal .btn-row{display:flex;gap:.5rem;margin-top:1.5rem}
+#settingsModal button{flex:1}
+#settingsModal .setting-note{font-size:.75rem;opacity:.75;margin:-.35rem 0 .85rem;line-height:1.4}
+.gear-btn{position:fixed;top:1rem;right:1rem;z-index:6;width:3rem;height:3rem;border-radius:50%;display:grid;place-items:center;background:#1a2332;border:1px solid #2a344a;cursor:pointer;font-size:1.5rem;transition:.2s}
+.gear-btn:hover{background:#243448;transform:rotate(90deg)}
+</style>
+</head>
+<body>
+<div id="app">
+<div id="header">
+<h3 style="margin:0">Terrain Gen (Production)</h3>
+<button id="btnOrbit">Orbit</button>
+<button id="btnSurface" class="active">Surface</button>
+<div class="spacer"></div>
+<label style="display:flex;align-items:center;gap:.5rem;cursor:pointer"><input type="checkbox" id="followGPS" checked /><span>GPS</span></label>
+<div class="pill">Pos: <span id="gpsStatus">—</span></div>
+<div class="pill">NKN: <span id="nknStatus">—</span></div>
+<button id="recalibrate">Recal</button>
+</div>
+<canvas id="c"></canvas>
+<div id="hud">
+<div class="pill">Mode: <span id="mode">surface</span></div>
+<div class="pill">Tiles: <span id="tileCount">0</span></div>
+<div class="pill">Verts: <span id="vertCount">0</span></div>
+<div class="pill">Queue: <span id="queueCount">0</span></div>
+<div class="pill">FPS: <span id="fps">—</span></div>
+<span class="small">Tap ⚙️ for settings. This is a comprehensive Cesium-like terrain system with adaptive LOD.</span>
+</div>
+</div>
+<div class="gear-btn" id="gearBtn" title="Settings">⚙️</div>
+<div id="settingsModal">
+<div class="modal-content">
+<h3>Terrain Settings</h3>
+<label>NKN Relay</label><input id="nknRelay" type="text" value="forwarder.4658c990865d63ad367a3f9e26203df9ad544f9d58ef27668db4f3ebc570eb5f" />
+<label>Dataset</label><input id="dataset" type="text" value="mapzen" />
+<label title="Area that keeps the tightest triangles around your focus point.">High Detail Radius (m)</label>
+<div class="slider-row"><input id="fineRadius" type="range" min="500" max="20000" step="100" value="4000" /><div class="value-display"><span id="fineRadiusVal">4000</span> m</div></div>
+<div class="setting-note">Triangles inside this distance subdivide all the way down to the minimum edge length.</div>
+<label title="How far the mesh ramps from 1 m triangles back to coarse terrain.">Detail Falloff Distance (m)</label>
+<div class="slider-row"><input id="fineFalloff" type="range" min="0" max="20000" step="100" value="6000" /><div class="value-display"><span id="fineFalloffVal">6000</span> m</div></div>
+<div class="setting-note">Outside the high detail radius, this buffer eases into your coarse terrain size.</div>
+<label title="Smallest triangle edge we try to reach inside the detailed zone.">Minimum Edge Length (m)</label>
+<div class="slider-row"><input id="minEdge" type="range" min="0.5" max="20" step="0.5" value="1" /><div class="value-display"><span id="minEdgeVal">1</span> m</div></div>
+<div class="setting-note">Use this to control the finest resolution available right under the camera.</div>
+<label>Maximum Radius (m)</label>
+<div class="slider-row"><input id="maxRadius" type="range" min="1000" max="200000" step="1000" value="50000" /><div class="value-display"><span id="maxRadiusVal">50000</span> m</div></div>
+<label>Elevation Exaggeration</label>
+<div class="slider-row"><input id="elevExag" type="range" min="0.1" max="5" step="0.1" value="1.0" /><div class="value-display"><span id="elevExagVal">1.0</span>x</div></div>
+<div class="btn-row"><button id="applySettings">Apply & Regenerate</button><button id="closeSettings" style="background:#2a344a">Close</button></div>
+</div>
+</div>
+<div id="overlay" class="show">
+<div class="card">
+<h3>Enable Sensors</h3>
+<p>Needs GPS, gyro, compass for placement and terrain generation.</p>
+<div style="display:flex;gap:.5rem;margin-top:.75rem"><button id="enable">Enable All</button><button id="continue">Continue</button></div>
+<p id="status" class="small" style="margin-top:.5rem;opacity:.85"></p>
+</div>
+</div>
+
+<script type="module">
+import*as THREE from'three';import{OrbitControls}from'three/addons/controls/OrbitControls.js';
+
+// ──────────────────────── Constants ────────────────────────
+const EARTH_RADIUS_M = 6_371_000;
+const CAMERA_FOV = 65;
+const CAMERA_NEAR = 0.01;
+const CAMERA_FAR = EARTH_RADIUS_M * 100;
+const SURFACE_EYE_HEIGHT = 1.7;
+const ORBIT_START_DISTANCE = EARTH_RADIUS_M * 2.5;
+const ICOS_DETAIL = 6; // Reduced from 6 - fewer base faces before subdivision
+const LON_OFFSET_DEG = -60;
+const isSecure = location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+const isiOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const FOCUS_DEBUG = false;
+const SHOW_FOCUS_MARKER = false;
+const FOCUS_BARY_EPS = 1e-4;
+const FOCUS_RAY_LENGTH = EARTH_RADIUS_M * 1.15;
+
+// ──────────────────────── Settings (persisted) ────────────────────────
+let settings = {
+  nknRelay: 'forwarder.4658c990865d63ad367a3f9e26203df9ad544f9d58ef27668db4f3ebc570eb5f',
+  dataset: 'mapzen',
+  maxRadius: 50000,
+  fineDetailRadius: 4000,
+  fineDetailFalloff: 6000,
+  elevExag: 1.0,
+  minSpacingM: 1,     // Minimum edge size within fine detail radius (meters)
+  maxSpacingM: 5000,  // Maximum spacing at outer edge (meters)
+  maxVertices: 50000  // Maximum vertices before stopping subdivision (performance limit)
+};
+
+function loadSettings() {
+  const stored = localStorage.getItem('terrainGenSettings');
+  if (stored) {
+    try { Object.assign(settings, JSON.parse(stored)); } catch {}
+  }
+  if (!Number.isFinite(settings.maxRadius)) settings.maxRadius = 50000;
+  if (!Number.isFinite(settings.fineDetailRadius)) settings.fineDetailRadius = 4000;
+  if (!Number.isFinite(settings.fineDetailFalloff)) settings.fineDetailFalloff = 6000;
+  if (!Number.isFinite(settings.minSpacingM)) settings.minSpacingM = 1;
+  if (!Number.isFinite(settings.maxSpacingM) || settings.maxSpacingM < settings.minSpacingM) settings.maxSpacingM = 5000;
+  if (!Number.isFinite(settings.elevExag)) settings.elevExag = 1.0;
+}
+
+function saveSettings() {
+  localStorage.setItem('terrainGenSettings', JSON.stringify(settings));
+}
+
+loadSettings();
+
+// ──────────────────────── DOM ────────────────────────
+const dom = {
+  canvas: document.getElementById('c'),
+  overlay: document.getElementById('overlay'),
+  enable: document.getElementById('enable'),
+  continue: document.getElementById('continue'),
+  status: document.getElementById('status'),
+  btnOrbit: document.getElementById('btnOrbit'),
+  btnSurface: document.getElementById('btnSurface'),
+  recalibrate: document.getElementById('recalibrate'),
+  followGPS: document.getElementById('followGPS'),
+  mode: document.getElementById('mode'),
+  tileCount: document.getElementById('tileCount'),
+  vertCount: document.getElementById('vertCount'),
+  queueCount: document.getElementById('queueCount'),
+  fps: document.getElementById('fps'),
+  gpsStatus: document.getElementById('gpsStatus'),
+  nknStatus: document.getElementById('nknStatus'),
+  gearBtn: document.getElementById('gearBtn'),
+  settingsModal: document.getElementById('settingsModal'),
+  nknRelay: document.getElementById('nknRelay'),
+  dataset: document.getElementById('dataset'),
+  maxRadius: document.getElementById('maxRadius'),
+  maxRadiusVal: document.getElementById('maxRadiusVal'),
+  fineRadius: document.getElementById('fineRadius'),
+  fineRadiusVal: document.getElementById('fineRadiusVal'),
+  fineFalloff: document.getElementById('fineFalloff'),
+  fineFalloffVal: document.getElementById('fineFalloffVal'),
+  minEdge: document.getElementById('minEdge'),
+  minEdgeVal: document.getElementById('minEdgeVal'),
+  elevExag: document.getElementById('elevExag'),
+  elevExagVal: document.getElementById('elevExagVal'),
+  applySettings: document.getElementById('applySettings'),
+  closeSettings: document.getElementById('closeSettings')
+};
+
+function syncSettingsUI() {
+  dom.nknRelay.value = settings.nknRelay;
+  dom.dataset.value = settings.dataset;
+  dom.maxRadius.value = settings.maxRadius;
+  dom.maxRadiusVal.textContent = Math.round(settings.maxRadius);
+  dom.fineRadius.value = settings.fineDetailRadius;
+  dom.fineRadiusVal.textContent = Math.round(settings.fineDetailRadius);
+  dom.fineFalloff.value = settings.fineDetailFalloff;
+  dom.fineFalloffVal.textContent = Math.round(settings.fineDetailFalloff);
+  dom.minEdge.value = settings.minSpacingM;
+  dom.minEdgeVal.textContent = Number(settings.minSpacingM.toFixed(2));
+  dom.elevExag.value = settings.elevExag;
+  dom.elevExagVal.textContent = settings.elevExag.toFixed(1);
+}
+
+syncSettingsUI();
+
+dom.maxRadius.addEventListener('input', () => dom.maxRadiusVal.textContent = Math.round(parseFloat(dom.maxRadius.value)));
+dom.fineRadius.addEventListener('input', () => dom.fineRadiusVal.textContent = Math.round(parseFloat(dom.fineRadius.value)));
+dom.fineFalloff.addEventListener('input', () => dom.fineFalloffVal.textContent = Math.round(parseFloat(dom.fineFalloff.value)));
+dom.minEdge.addEventListener('input', () => dom.minEdgeVal.textContent = Number(parseFloat(dom.minEdge.value).toFixed(2)));
+dom.elevExag.addEventListener('input', () => dom.elevExagVal.textContent = parseFloat(dom.elevExag.value).toFixed(1));
+
+dom.gearBtn.addEventListener('click', () => dom.settingsModal.classList.add('show'));
+dom.closeSettings.addEventListener('click', () => dom.settingsModal.classList.remove('show'));
+
+dom.applySettings.addEventListener('click', () => {
+  settings.nknRelay = dom.nknRelay.value.trim();
+  settings.dataset = dom.dataset.value.trim();
+  const maxRadiusValue = parseFloat(dom.maxRadius.value);
+  settings.maxRadius = Number.isFinite(maxRadiusValue) ? Math.max(1000, maxRadiusValue) : 50000;
+  const fineRadiusValue = parseFloat(dom.fineRadius.value);
+  settings.fineDetailRadius = Number.isFinite(fineRadiusValue) ? Math.max(0, fineRadiusValue) : 4000;
+  const fineFalloffValue = parseFloat(dom.fineFalloff.value);
+  settings.fineDetailFalloff = Number.isFinite(fineFalloffValue) ? Math.max(0, fineFalloffValue) : 6000;
+  const minEdgeValue = parseFloat(dom.minEdge.value);
+  settings.minSpacingM = Number.isFinite(minEdgeValue) ? Math.max(0.1, minEdgeValue) : 1;
+  const elevValue = parseFloat(dom.elevExag.value);
+  settings.elevExag = Number.isFinite(elevValue) ? Math.max(0.1, elevValue) : 1.0;
+  saveSettings();
+  syncSettingsUI();
+  dom.settingsModal.classList.remove('show');
+  regenerateTerrain();
+});
+
+// ──────────────────────── Three.js Scene ────────────────────────
+const renderer = new THREE.WebGLRenderer({ canvas: dom.canvas, antialias: true, logarithmicDepthBuffer: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0b0d12);
+
+const cameraOrbit = new THREE.PerspectiveCamera(CAMERA_FOV, innerWidth/innerHeight, CAMERA_NEAR, CAMERA_FAR);
+cameraOrbit.position.set(ORBIT_START_DISTANCE, ORBIT_START_DISTANCE*0.4, ORBIT_START_DISTANCE);
+cameraOrbit.lookAt(0,0,0);
+
+const cameraSurface = new THREE.PerspectiveCamera(CAMERA_FOV, innerWidth/innerHeight, CAMERA_NEAR, CAMERA_FAR);
+
+let activeCamera = cameraSurface;
+let mode = 'surface';
+
+const orbitControls = new OrbitControls(cameraOrbit, renderer.domElement);
+orbitControls.enableDamping = true;
+orbitControls.target.set(0,0,0);
+orbitControls.minDistance = EARTH_RADIUS_M*1.05;
+orbitControls.maxDistance = CAMERA_FAR;
+orbitControls.enabled = false;
+
+// Lighting
+scene.add(new THREE.AmbientLight(0xffffff, 0.3));
+const hemi = new THREE.HemisphereLight(0xbfd8ff, 0x101318, 0.5);
+scene.add(hemi);
+const sun = new THREE.DirectionalLight(0xffffff, 0.7);
+sun.position.set(5, 10, 7).multiplyScalar(EARTH_RADIUS_M * 2);
+scene.add(sun);
+
+// Globe
+function applyLonOffset(tex, deg) {
+  if (!tex) return;
+  tex.wrapS = THREE.RepeatWrapping;
+  if (tex.wrapT !== THREE.ClampToEdgeWrapping) tex.wrapT = THREE.ClampToEdgeWrapping;
+  const off = ((deg/360)%1+1)%1;
+  tex.offset.x = off;
+  tex.needsUpdate = true;
+}
+
+// Create base icosahedron (low detail to start)
+let globeGeometry = new THREE.IcosahedronGeometry(EARTH_RADIUS_M, ICOS_DETAIL);
+const loader = new THREE.TextureLoader();
+loader.setCrossOrigin('anonymous');
+const earthTexture = loader.load('2k_earth_daymap.jpg', (tex) => {
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+});
+
+applyLonOffset(earthTexture, LON_OFFSET_DEG);
+
+const globeMaterial = new THREE.MeshStandardMaterial({
+  map: earthTexture,
+  roughness: 1.0,
+  metalness: 0.0,
+  wireframe: false,  // Show subdivision wireframe
+  side: THREE.DoubleSide
+});
+const globe = new THREE.Mesh(globeGeometry, globeMaterial);
+scene.add(globe);
+
+globe.frustumCulled = false;
+
+// Wireframe for terrain mesh
+const wireframeGeometry = new THREE.BufferGeometry();
+const wireframeMaterial = new THREE.LineBasicMaterial({
+  color: 0xffffff,
+  transparent: true,
+  opacity: 0.8,  // Increased from 0.3 to make subdivision visible
+  depthTest: true
+});
+const wireframeMesh = new THREE.LineSegments(wireframeGeometry, wireframeMaterial);
+wireframeMesh.frustumCulled = false;
+scene.add(wireframeMesh);
+
+// Store original base vertices and faces for subdivision
+const baseIcosahedron = {
+  vertices: [],
+  faces: []
+};
+
+function captureBaseIcosahedron() {
+  const pos = globeGeometry.getAttribute('position');
+  const idx = globeGeometry.getIndex();
+
+  // Store base vertices
+  for (let i = 0; i < pos.count; i++) {
+    baseIcosahedron.vertices.push(new THREE.Vector3(
+      pos.getX(i),
+      pos.getY(i),
+      pos.getZ(i)
+    ));
+  }
+
+  // Store base faces (triangles)
+  if (idx) {
+    for (let i = 0; i < idx.count; i += 3) {
+      baseIcosahedron.faces.push([
+        idx.getX(i),
+        idx.getX(i + 1),
+        idx.getX(i + 2)
+      ]);
+    }
+  } else {
+    // No index buffer - vertices are in triangle list format
+    for (let i = 0; i < pos.count; i += 3) {
+      baseIcosahedron.faces.push([i, i + 1, i + 2]);
+    }
+  }
+}
+
+captureBaseIcosahedron();
+console.log(`📐 Base icosahedron: ${baseIcosahedron.vertices.length} vertices, ${baseIcosahedron.faces.length} faces`);
+
+// Raycaster for clicking on globe
+const raycaster = new THREE.Raycaster();
+const pointer = new THREE.Vector2();
+const triangleHelper = new THREE.Triangle();
+const tmpProjected = new THREE.Vector3();
+const tmpBary = new THREE.Vector3();
+const tmpPlane = new THREE.Plane();
+const tmpCenter = new THREE.Vector3();
+const tmpChildCenter = new THREE.Vector3();
+const tmpFocusDir = new THREE.Vector3();
+const tmpFocusEnd = new THREE.Vector3();
+const tmpRayHit = new THREE.Vector3();
+const tmpElevationDir = new THREE.Vector3();
+const tmpElevationHit = new THREE.Vector3();
+const focusRay = new THREE.Ray(new THREE.Vector3(), new THREE.Vector3(1, 0, 0));
+let focusMarkerGeometry = null;
+let focusMarkerMaterial = null;
+let focusMarker = null;
+let focusRayMaterial = null;
+let focusRayGeometry = null;
+let focusRayLine = null;
+const elevationRay = new THREE.Ray(new THREE.Vector3(), new THREE.Vector3(1, 0, 0));
+let elevationRayGeometry = null;
+let elevationRayMaterial = null;
+let elevationRayLine = null;
+const focusedFaceBary = new THREE.Vector3(1/3, 1/3, 1/3);
+let hasFocusedBary = false;
+
+function onResize() {
+  const aspect = innerWidth / innerHeight;
+  cameraOrbit.aspect = cameraSurface.aspect = aspect;
+  cameraOrbit.updateProjectionMatrix();
+  cameraSurface.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+}
+addEventListener('resize', onResize);
+
+// ──────────────────────── Orientation System ────────────────────────
+const Y_UP = new THREE.Vector3(0,1,0);
+const Z_AXIS = new THREE.Vector3(0,0,1);
+
+const qDevice = new THREE.Quaternion();
+const qYawOffset = new THREE.Quaternion();
+const qLocalToWorld = new THREE.Quaternion();
+const qFinal = new THREE.Quaternion();
+
+const eulerYXZ = new THREE.Euler(0,0,0,'YXZ');
+const q1 = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5));
+
+function setFromDeviceEuler(outQ, alpha, beta, gamma, screenOrientRad) {
+  eulerYXZ.set(beta, alpha, -gamma, 'YXZ');
+  outQ.setFromEuler(eulerYXZ);
+  outQ.multiply(q1);
+  const q0 = new THREE.Quaternion().setFromAxisAngle(Z_AXIS, -screenOrientRad);
+  outQ.multiply(q0);
+  return outQ;
+}
+
+function getScreenAngleRad() {
+  const angle = (screen.orientation && typeof screen.orientation.angle === 'number')
+    ? screen.orientation.angle
+    : (window.orientation || 0);
+  return angle * Math.PI / 180;
+}
+
+function screenAngle() {
+  if (screen.orientation && typeof screen.orientation.angle === 'number') return screen.orientation.angle;
+  return (typeof window.orientation === 'number') ? window.orientation : 0;
+}
+
+const fwd = new THREE.Vector3();
+function yawFromQuaternion(q) {
+  fwd.set(0,0,-1).applyQuaternion(q);
+  return Math.atan2(-fwd.x, -fwd.z);
+}
+
+// ──────────────────────── Sensor State ────────────────────────
+let usingSensor = '—';
+let haveCompass = false;
+let compassDeg = null;
+let smoothedCompassDeg = null;
+let manualYawOffsetRad = 0;
+let initialAligned = false;
+let awaitingInitialHeading = false;
+let DO = { alpha: null, beta: null, gamma: null };
+
+// ──────────────────────── GPS State ────────────────────────
+let followGPS = true;
+let gps = {
+  have: false,
+  lat: null,
+  lon: null,
+  alt: 0,
+  acc: null,
+  heading: null,
+  speed: null
+};
+let surfacePosition = new THREE.Vector3(1, 0, 0).multiplyScalar(EARTH_RADIUS_M);
+let focusedPoint = surfacePosition.clone();
+
+dom.followGPS.addEventListener('change', () => {
+  followGPS = dom.followGPS.checked;
+  if (followGPS) {
+    focusedBaseFaceIndex = null;
+    focusedPoint.copy(surfacePosition);
+    hasFocusedBary = false;
+    updateFocusIndicators(focusedPoint);
+  }
+});
+
+// ──────────────────────── Math Helpers ────────────────────────
+const norm360 = d => (d % 360 + 360) % 360;
+function deltaDeg(a, b) {
+  let d = norm360(a) - norm360(b);
+  if (d > 180) d -= 360;
+  if (d <= -180) d += 360;
+  return d;
+}
+function normPi(rad) {
+  let r = (rad + Math.PI) % (2*Math.PI);
+  if (r < 0) r += 2*Math.PI;
+  return r - Math.PI;
+}
+
+function latLonToCartesian(latDeg, lonDeg, altMeters = 0) {
+  const latRad = THREE.MathUtils.degToRad(latDeg);
+  const lonRad = THREE.MathUtils.degToRad(lonDeg);
+  const r = EARTH_RADIUS_M + altMeters;
+  const x = r * Math.cos(latRad) * Math.cos(lonRad);
+  const y = r * Math.sin(latRad);
+  const z = r * Math.cos(latRad) * Math.sin(lonRad);
+  return new THREE.Vector3(x, y, z);
+}
+
+function cartesianToLatLon(vec) {
+  const r = vec.length();
+  const lat = Math.asin(THREE.MathUtils.clamp(vec.y / r, -1, 1));
+  const lon = Math.atan2(vec.z, vec.x);
+  return {
+    latDeg: THREE.MathUtils.radToDeg(lat),
+    lonDeg: THREE.MathUtils.radToDeg(lon)
+  };
+}
+
+function metersPerDegLat(phiRad){
+  return 111132.954 - 559.822*Math.cos(2*phiRad) + 1.175*Math.cos(4*phiRad) - 0.0023*Math.cos(6*phiRad);
+}
+function metersPerDegLon(phiRad){
+  return 111412.84*Math.cos(phiRad) - 93.5*Math.cos(3*phiRad) + 0.118*Math.cos(5*phiRad);
+}
+
+// ──────────────────────── Geohash ────────────────────────
+const GH32 = '0123456789bcdefghjkmnpqrstuvwxyz';
+function geohashEncode(lat, lon, precision=9){
+  let bit=0, even=true, latMin=-90,latMax=90,lonMin=-180,lonMax=180, ch=0, hash='';
+  while (hash.length < precision){
+    if (even){ const mid=(lonMin+lonMax)/2; if (lon > mid){ ch |= (1<<(4-bit)); lonMin=mid; } else { lonMax=mid; } }
+    else { const mid=(latMin+latMax)/2; if (lat > mid){ ch |= (1<<(4-bit)); latMin=mid; } else { latMax=mid; } }
+    even=!even;
+    if (bit<4){ bit++; } else { hash += GH32[ch]; bit=0; ch=0; }
+  }
+  return hash;
+}
+function pickGeohashPrecision(spacingM){
+  if (spacingM >= 1500) return 6;
+  if (spacingM >= 300)  return 7;
+  if (spacingM >= 60)   return 8;
+  if (spacingM >= 10)   return 9;
+  return 10;
+}
+
+// ──────────────────────── NKN Client ────────────────────────
+let nknClient = null;
+let nknReady = false;
+const pending = new Map();
+
+function uuidv4(){
+  if (crypto.randomUUID) return crypto.randomUUID();
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c=>{
+    const r = Math.random()*16|0, v = c==='x'?r:(r&0x3|0x8); return v.toString(16);
+  });
+}
+
+function sendWithReply(dest, obj, timeoutMs=25000) {
+  if (!nknReady) {
+    return Promise.reject(new Error('NKN client not ready'));
+  }
+  const id = obj.id || uuidv4(); obj.id = id;
+  const p = new Promise((resolve, reject)=>{
+    const t = setTimeout(()=>{ pending.delete(id); reject(new Error('DM reply timeout')); }, timeoutMs);
+    pending.set(id, { resolve, timeout: t });
+  });
+  nknClient.send(dest, JSON.stringify(obj)).then(()=>{
+    console.log('📤 sent DM', id);
+  }).catch(err=>{
+    const st = pending.get(id); if (st){ clearTimeout(st.timeout); pending.delete(id); }
+    console.error('❌ send error:', err);
+  });
+  return p;
+}
+
+function handleIncoming(src, payload){
+  const text = (typeof payload==='string') ? payload : new TextDecoder().decode(payload);
+  let msg; try { msg = JSON.parse(text); } catch { return; }
+  if (msg && msg.type === 'http.response' && msg.id && pending.has(msg.id)) {
+    const st = pending.get(msg.id); clearTimeout(st.timeout); pending.delete(msg.id); st.resolve(msg); return;
+  }
+}
+
+async function initNKN() {
+  if (!window.nkn || !nkn.MultiClient) {
+    dom.nknStatus.textContent = 'SDK not loaded';
+    return;
+  }
+
+  dom.nknStatus.textContent = 'connecting...';
+  try {
+    nknClient = new nkn.MultiClient({ numSubClients: 4, originalClient: false });
+
+    nknClient.onConnect(() => {
+      nknReady = true;
+      dom.nknStatus.textContent = 'connected';
+      console.log('✅ NKN connected');
+    });
+
+    nknClient.onMessage(({ src, payload }) => handleIncoming(src, payload));
+  } catch (err) {
+    dom.nknStatus.textContent = 'error';
+    console.error('NKN init error:', err);
+  }
+}
+
+// ──────────────────────── AbsoluteOrientationSensor ────────────────────────
+let absSensor = null;
+async function tryStartAbsoluteSensor() {
+  if (!('AbsoluteOrientationSensor' in window)) return false;
+  try {
+    absSensor = new AbsoluteOrientationSensor({ frequency: 60, referenceFrame: 'screen' });
+  } catch { return false; }
+
+  return new Promise((resolve) => {
+    let started = false;
+    absSensor.addEventListener('reading', () => {
+      if (!started) {
+        started = true;
+        usingSensor = 'AbsoluteOrientationSensor';
+        resolve(true);
+      }
+      qDevice.fromArray(absSensor.quaternion);
+    });
+    absSensor.addEventListener('error', () => resolve(false));
+    try { absSensor.start(); } catch { resolve(false); }
+  });
+}
+
+// ──────────────────────── DeviceOrientation Fallback ────────────────────────
+function computeHeadingFromDO(ev) {
+  if (typeof ev.webkitCompassHeading === 'number' && !Number.isNaN(ev.webkitCompassHeading)) {
+    haveCompass = true;
+    return norm360(ev.webkitCompassHeading);
+  }
+  if (typeof ev.alpha === 'number' && !Number.isNaN(ev.alpha)) {
+    let hdg = 360 - ev.alpha;
+    hdg += screenAngle();
+    haveCompass = true;
+    return norm360(hdg);
+  }
+  return null;
+}
+
+let doHandler = null;
+function startDeviceOrientation() {
+  usingSensor = 'DeviceOrientationEvent';
+  doHandler = (ev) => {
+    DO.alpha = (typeof ev.alpha === 'number') ? ev.alpha : null;
+    DO.beta  = (typeof ev.beta  === 'number') ? ev.beta  : null;
+    DO.gamma = (typeof ev.gamma === 'number') ? ev.gamma : null;
+
+    const hdg = computeHeadingFromDO(ev);
+    if (hdg != null) compassDeg = hdg;
+
+    const alpha = (ev.alpha ?? 0) * Math.PI/180;
+    const beta  = (ev.beta  ?? 0) * Math.PI/180;
+    const gamma = (ev.gamma ?? 0) * Math.PI/180;
+    setFromDeviceEuler(qDevice, alpha, beta, gamma, getScreenAngleRad());
+  };
+  const type = 'ondeviceorientationabsolute' in window ? 'deviceorientationabsolute' : 'deviceorientation';
+  window.addEventListener(type, doHandler, false);
+}
+
+// ──────────────────────── GPS ────────────────────────
+let geoWatchId = null;
+function startGPS() {
+  if (!('geolocation' in navigator)) return;
+  if (!isSecure) return;
+  try {
+    geoWatchId = navigator.geolocation.watchPosition(
+      (pos) => {
+        const c = pos.coords;
+        gps.have = true;
+        gps.lat = c.latitude;
+        gps.lon = c.longitude;
+        gps.alt = Number.isFinite(c.altitude) ? c.altitude : 0;
+        gps.acc = c.accuracy;
+        gps.heading = (c.heading != null && !Number.isNaN(c.heading)) ? norm360(c.heading) : gps.heading;
+        gps.speed = c.speed;
+
+        if (followGPS) {
+          surfacePosition.copy(latLonToCartesian(gps.lat, gps.lon, gps.alt));
+          focusedPoint.copy(surfacePosition);
+          updateFocusIndicators(focusedPoint);
+        }
+
+        dom.gpsStatus.textContent = `${gps.lat.toFixed(6)}°, ${gps.lon.toFixed(6)}°`;
+      },
+      (err) => {},
+      { enableHighAccuracy: true, maximumAge: 1000, timeout: 10000 }
+    );
+  } catch (err) {}
+}
+
+// ──────────────────────── Permissions ────────────────────────
+async function requestPermissions() {
+  if (!isSecure) return false;
+
+  async function requestIOS() {
+    let p1 = 'n/a', p2 = 'n/a';
+    try { if (DeviceMotionEvent?.requestPermission) p1 = await DeviceMotionEvent.requestPermission(); } catch {}
+    try { if (DeviceOrientationEvent?.requestPermission) p2 = await DeviceOrientationEvent.requestPermission(); } catch {}
+    return (p1 === 'granted' || p2 === 'granted');
+  }
+  async function requestNonIOS() {
+    return true;
+  }
+
+  const ok = isiOS ? await requestIOS() : await requestNonIOS();
+  if (!ok) return false;
+
+  let started = await tryStartAbsoluteSensor();
+  if (!started) startDeviceOrientation();
+
+  startGPS();
+
+  awaitingInitialHeading = true;
+  dom.status.textContent = 'Calibrating heading…';
+
+  return true;
+}
+
+// ──────────────────────── Compass Smoothing ────────────────────────
+function updateCompassSmoothing() {
+  if (compassDeg == null) return;
+  if (smoothedCompassDeg == null) {
+    smoothedCompassDeg = compassDeg;
+    return;
+  }
+  const alpha = 0.05;
+  const d = deltaDeg(compassDeg, smoothedCompassDeg);
+  smoothedCompassDeg = norm360(smoothedCompassDeg + d * alpha);
+}
+
+function synthesizeHeadingFromQuat() {
+  const up = surfacePosition.clone().normalize();
+  const qUp = new THREE.Quaternion().setFromUnitVectors(Y_UP, up);
+  const qLocal = qUp.clone().invert().multiply(qDevice);
+  const yaw = yawFromQuaternion(qLocal);
+  compassDeg = norm360(THREE.MathUtils.radToDeg(yaw));
+}
+
+// ──────────────────────── Compass-First Alignment ────────────────────────
+function tryInitialAlign() {
+  if (initialAligned || smoothedCompassDeg == null) return;
+
+  const up = surfacePosition.clone().normalize();
+  const qUp = new THREE.Quaternion().setFromUnitVectors(Y_UP, up);
+  const qLocal = qUp.clone().invert().multiply(qDevice);
+  const gyYaw = yawFromQuaternion(qLocal);
+
+  const desiredYaw = smoothedCompassDeg * Math.PI/180;
+  const err = normPi(desiredYaw - gyYaw);
+  manualYawOffsetRad = err;
+
+  initialAligned = true;
+}
+
+function maybeHideOverlayAfterAlign() {
+  if (awaitingInitialHeading && initialAligned) {
+    dom.overlay.classList.remove('show');
+    awaitingInitialHeading = false;
+    dom.status.textContent = '';
+  }
+}
+
+// ──────────────────────── Surface Movement State ────────────────────────
+const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+const keys = new Set();
+let isDragging = false;
+let hasManualControl = false; // Track if user has used manual controls (persists after drag release)
+let surfaceForward = new THREE.Vector3(0, 0, -1); // forward direction in world space
+let surfacePitch = 0; // pitch angle for manual look
+let walkSpeed = 5; // m/s
+const WALK_SPEED_BASE = 5;
+const WALK_SPEED_SPRINT = 20;
+
+// ──────────────────────── Surface-Aligned Orientation Transform ────────────────────────
+function updateSurfaceCameraOrientation() {
+  if (!gps.have) return;
+
+  const up = surfacePosition.clone().normalize();
+
+  // On desktop with manual controls, use manual forward direction
+  if (!isMobile && hasManualControl) {
+    // Project forward onto tangent plane
+    const tangentForward = surfaceForward.clone().sub(up.clone().multiplyScalar(surfaceForward.dot(up))).normalize();
+
+    // Apply pitch
+    const pitchQuat = new THREE.Quaternion().setFromAxisAngle(
+      new THREE.Vector3().crossVectors(tangentForward, up).normalize(),
+      surfacePitch
+    );
+
+    // Look direction
+    const lookDir = tangentForward.clone().applyQuaternion(pitchQuat);
+
+    // Set camera orientation
+    cameraSurface.lookAt(cameraSurface.position.clone().add(lookDir));
+    cameraSurface.up.copy(up);
+  } else {
+    // On mobile or when not using manual controls, use device orientation
+    qYawOffset.setFromAxisAngle(Y_UP, manualYawOffsetRad);
+    qFinal.copy(qDevice).premultiply(qYawOffset);
+
+    qLocalToWorld.setFromUnitVectors(Y_UP, up);
+
+    cameraSurface.quaternion.copy(qFinal).premultiply(qLocalToWorld);
+    cameraSurface.up.copy(up);
+
+    // Update forward direction from camera
+    surfaceForward.set(0, 0, -1).applyQuaternion(cameraSurface.quaternion).normalize();
+  }
+
+  const eyeHeight = SURFACE_EYE_HEIGHT + (gps.alt > 0 ? gps.alt : 0);
+  cameraSurface.position.copy(up.multiplyScalar(EARTH_RADIUS_M + eyeHeight));
+}
+
+// ──────────────────────── Walking System ────────────────────────
+function updateSurfaceWalking(dt) {
+  if (mode !== 'surface' || !gps.have) return;
+
+  const up = surfacePosition.clone().normalize();
+
+  // Project forward onto tangent plane
+  const tangentForward = surfaceForward.clone().sub(up.clone().multiplyScalar(surfaceForward.dot(up))).normalize();
+  const right = new THREE.Vector3().crossVectors(tangentForward, up).normalize();
+
+  // Input direction
+  const dir = new THREE.Vector3();
+  if (keys.has('ArrowUp') || keys.has('KeyW')) dir.sub(tangentForward);
+  if (keys.has('ArrowDown') || keys.has('KeyS')) dir.add(tangentForward);
+  if (keys.has('ArrowLeft') || keys.has('KeyA')) dir.add(right);
+  if (keys.has('ArrowRight') || keys.has('KeyD')) dir.sub(right);
+
+  // Sprint with Shift
+  const isSprinting = keys.has('ShiftLeft') || keys.has('ShiftRight');
+  walkSpeed = isSprinting ? WALK_SPEED_SPRINT : WALK_SPEED_BASE;
+
+  if (dir.lengthSq() > 0) {
+    dir.normalize();
+    const distance = walkSpeed * dt;
+    const theta = distance / EARTH_RADIUS_M;
+    const axis = new THREE.Vector3().crossVectors(dir, up);
+    if (axis.lengthSq() > 1e-12) {
+      axis.normalize();
+
+      // Rotate position around sphere
+      surfacePosition.applyAxisAngle(axis, theta);
+      surfacePosition.setLength(EARTH_RADIUS_M);
+
+      // Update GPS from new position
+      const latLon = cartesianToLatLon(surfacePosition);
+      gps.lat = latLon.latDeg;
+      gps.lon = latLon.lonDeg;
+
+      // Parallel transport forward direction
+      surfaceForward.applyAxisAngle(axis, theta);
+      surfaceForward.sub(up.clone().multiplyScalar(surfaceForward.dot(up))).normalize();
+
+      dom.gpsStatus.textContent = `${gps.lat.toFixed(6)}°, ${gps.lon.toFixed(6)}° (walking)`;
+      if (followGPS) {
+        focusedPoint.copy(surfacePosition);
+        updateFocusIndicators(focusedPoint);
+      }
+    }
+  }
+}
+
+// ──────────────────────── Input Handlers ────────────────────────
+
+// Keyboard
+window.addEventListener('keydown', (e) => {
+  if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code)) e.preventDefault();
+  if (['KeyW','KeyA','KeyS','KeyD'].includes(e.code)) e.preventDefault();
+  keys.add(e.code);
+  // Enable manual control when keys are pressed on desktop
+  if (!isMobile && mode === 'surface') {
+    hasManualControl = true;
+  }
+});
+
+window.addEventListener('keyup', (e) => {
+  keys.delete(e.code);
+});
+
+// Mouse/touch drag for looking around
+renderer.domElement.addEventListener('pointerdown', (e) => {
+  if (mode === 'surface') {
+    isDragging = true;
+    renderer.domElement.style.cursor = 'grabbing';
+    // Enable manual control when dragging on desktop
+    if (!isMobile) {
+      hasManualControl = true;
+    }
+  }
+});
+
+renderer.domElement.addEventListener('pointerup', () => {
+  isDragging = false;
+  renderer.domElement.style.cursor = '';
+});
+
+renderer.domElement.addEventListener('pointercancel', () => {
+  isDragging = false;
+  renderer.domElement.style.cursor = '';
+});
+
+renderer.domElement.addEventListener('pointermove', (e) => {
+  if (mode !== 'surface' || !isDragging) return;
+
+  const movementX = e.movementX || 0;
+  const movementY = e.movementY || 0;
+  const yawSpeed = 0.005;
+  const pitchSpeed = 0.004;
+
+  const up = surfacePosition.clone().normalize();
+
+  // Yaw (rotate forward vector around up axis)
+  surfaceForward.applyAxisAngle(up, -movementX * yawSpeed);
+
+  // Pitch
+  surfacePitch = THREE.MathUtils.clamp(
+    surfacePitch - movementY * pitchSpeed,
+    THREE.MathUtils.degToRad(-85),
+    THREE.MathUtils.degToRad(85)
+  );
+
+  updateSurfaceCameraOrientation();
+});
+
+// ──────────────────────── Click to Place ────────────────────────
+renderer.domElement.addEventListener('click', (e) => {
+  if (mode !== 'orbit') return;
+
+  const rect = renderer.domElement.getBoundingClientRect();
+  pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+  pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+
+  raycaster.setFromCamera(pointer, activeCamera);
+  const hits = raycaster.intersectObject(globe, false);
+
+  if (hits.length) {
+    const p = hits[0].point.clone().setLength(EARTH_RADIUS_M);
+    const latLon = cartesianToLatLon(p);
+
+    followGPS = false;
+    dom.followGPS.checked = false;
+
+    gps.have = true;
+    gps.lat = latLon.latDeg;
+    gps.lon = latLon.lonDeg;
+    gps.alt = 0;
+
+    surfacePosition.copy(p);
+    focusedPoint.copy(p);
+    updateFocusIndicators(focusedPoint);
+
+    let baseFaceIndex = null;
+    const faceIndex = hits[0].faceIndex;
+    const faceBaseMap = globeGeometry?.userData?.faceBaseIndex;
+    if (faceBaseMap && faceIndex != null && faceIndex < faceBaseMap.length) {
+      baseFaceIndex = faceBaseMap[faceIndex];
+    }
+    if (baseFaceIndex == null || baseFaceIndex === undefined) {
+      baseFaceIndex = findClosestBaseFaceIndex();
+    }
+    focusedBaseFaceIndex = baseFaceIndex;
+    updateFocusedFaceBary(baseFaceIndex, focusedPoint);
+
+    if (FOCUS_DEBUG) {
+      console.log(`🎯 Click registered at: (${p.x.toFixed(0)}, ${p.y.toFixed(0)}, ${p.z.toFixed(0)})`);
+      console.log(`📍 Base face index: ${baseFaceIndex}, Bary coords: (${focusedFaceBary.x.toFixed(3)}, ${focusedFaceBary.y.toFixed(3)}, ${focusedFaceBary.z.toFixed(3)})`);
+    }
+
+    initialAligned = false;
+    awaitingInitialHeading = false;
+    manualYawOffsetRad = 0;
+
+    dom.gpsStatus.textContent = `${gps.lat.toFixed(6)}°, ${gps.lon.toFixed(6)}° (manual)`;
+
+    cancelRegeneration = true;
+    currentRegenerationRunId++;
+    resetTerrainGeometryToBase();
+
+    // Force immediate subdivision update at clicked location
+    lastSubdivisionUpdate = 0; // Reset throttle
+    lastSubdivisionPosition.copy(surfacePosition);
+    regenerateTerrain();
+  }
+});
+
+// ──────────────────────── Mode Switching ────────────────────────
+function switchMode(newMode) {
+  mode = newMode;
+  dom.mode.textContent = mode;
+
+  if (mode === 'orbit') {
+    activeCamera = cameraOrbit;
+    orbitControls.enabled = true;
+    dom.btnOrbit.classList.add('active');
+    dom.btnSurface.classList.remove('active');
+    // In orbit mode we keep current focused face selection until user clicks elsewhere
+  } else {
+    activeCamera = cameraSurface;
+    orbitControls.enabled = false;
+    dom.btnOrbit.classList.remove('active');
+    dom.btnSurface.classList.add('active');
+    focusedBaseFaceIndex = null;
+    focusedPoint.copy(surfacePosition);
+    hasFocusedBary = false;
+    updateFocusIndicators(focusedPoint);
+  }
+}
+
+dom.btnOrbit.addEventListener('click', () => switchMode('orbit'));
+dom.btnSurface.addEventListener('click', () => switchMode('surface'));
+
+// ──────────────────────── Recalibrate ────────────────────────
+dom.recalibrate.addEventListener('click', () => {
+  if (smoothedCompassDeg == null && compassDeg == null) return;
+  const heading = (smoothedCompassDeg != null) ? smoothedCompassDeg : compassDeg;
+
+  const up = surfacePosition.clone().normalize();
+  const qUp = new THREE.Quaternion().setFromUnitVectors(Y_UP, up);
+  const qLocal = qUp.clone().invert().multiply(qDevice);
+  const gyYaw = yawFromQuaternion(qLocal);
+  const desiredYaw = heading * Math.PI/180;
+
+  manualYawOffsetRad = normPi(desiredYaw - gyYaw);
+});
+
+// ──────────────────────── Overlay UX ────────────────────────
+dom.enable.addEventListener('click', async () => {
+  await requestPermissions();
+});
+
+dom.continue.addEventListener('click', async () => {
+  // On desktop, just hide the overlay and set a fake GPS location
+  if (!isMobile) {
+    dom.overlay.classList.remove('show');
+    // Set default location (San Francisco)
+    gps.have = true;
+    gps.lat = 37.7749;
+    gps.lon = -122.4194;
+    gps.alt = 0;
+    surfacePosition.copy(latLonToCartesian(gps.lat, gps.lon, 0));
+    focusedPoint.copy(surfacePosition);
+    updateFocusIndicators(focusedPoint);
+    dom.gpsStatus.textContent = `${gps.lat.toFixed(6)}°, ${gps.lon.toFixed(6)}° (desktop)`;
+  } else {
+    await requestPermissions();
+  }
+});
+
+// Auto-hide overlay on desktop
+if (!isiOS && !isMobile) {
+  dom.overlay.classList.remove('show');
+  // Set default location (San Francisco)
+  gps.have = true;
+  gps.lat = 37.7749;
+  gps.lon = -122.4194;
+  gps.alt = 0;
+  surfacePosition.copy(latLonToCartesian(gps.lat, gps.lon, 0));
+  focusedPoint.copy(surfacePosition);
+  updateFocusIndicators(focusedPoint);
+  dom.gpsStatus.textContent = `${gps.lat.toFixed(6)}°, ${gps.lon.toFixed(6)}° (desktop)`;
+}
+
+// ──────────────────────── Icosahedron Subdivision System ────────────────────────
+
+// Subdivision state
+const subdividedGeometry = {
+  vertices: [],      // All vertices (base + subdivided) - CURRENT positions (with elevation applied)
+  originalVertices: [], // Original un-elevated positions (for calculating radial direction)
+  faces: [],         // All triangular faces
+  vertexData: new Map(), // Map vertex index to {elevation, fetching, lat, lon}
+  edgeCache: new Map(),   // Cache for midpoint vertices to avoid duplicates
+  uvCoords: [],      // Store original UV coordinates (before elevation is applied)
+  faceBaseIndex: []  // Map each triangle to its originating base icosahedron face
+};
+
+// Fetch queue for elevation data
+const fetchQueue = [];
+
+// Currently focused base face for adaptive subdivision
+let focusedBaseFaceIndex = null;
+
+// Visual markers for vertices using InstancedMesh for performance
+const MAX_MARKERS = 100000; // Maximum number of markers
+let markerInstanceMesh = null;
+const markerGeometry = new THREE.CircleGeometry(500, 8); // 500m radius circles (bigger so we can see them)
+const markerMaterial = new THREE.MeshBasicMaterial({
+  side: THREE.DoubleSide,
+  transparent: false,
+  depthTest: false,  // Always render on top
+  depthWrite: false
+});
+const vertexMarkerIndices = new Map(); // vertex index -> instance index
+let markerCount = 0;
+const WHITE_COLOR = new THREE.Color(0xffffff);
+const GREEN_COLOR = new THREE.Color(0x00ff00);
+
+// Focus point marker (red sphere to show where we clicked)
+focusMarkerGeometry = new THREE.SphereGeometry(2000, 16, 16); // 2km radius red sphere
+focusMarkerMaterial = new THREE.MeshBasicMaterial({
+  color: 0xff0000,
+  transparent: true,
+  opacity: 0.8,
+  depthTest: false,
+  depthWrite: false
+});
+focusMarker = new THREE.Mesh(focusMarkerGeometry, focusMarkerMaterial);
+focusMarker.visible = false;
+scene.add(focusMarker);
+
+focusRayMaterial = new THREE.LineBasicMaterial({
+  color: 0x39ff14,
+  transparent: true,
+  opacity: 0.95,
+  depthTest: false,
+  depthWrite: false
+});
+focusRayGeometry = new THREE.BufferGeometry();
+focusRayGeometry.setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0, 0, 0, 0], 3));
+focusRayLine = new THREE.Line(focusRayGeometry, focusRayMaterial);
+focusRayLine.frustumCulled = false;
+focusRayLine.visible = false;
+focusRayLine.renderOrder = 5;
+scene.add(focusRayLine);
+
+elevationRayMaterial = new THREE.LineBasicMaterial({
+  color: 0xff3333,
+  transparent: true,
+  opacity: 0.9,
+  depthTest: false,
+  depthWrite: false
+});
+elevationRayGeometry = new THREE.BufferGeometry();
+elevationRayGeometry.setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0, 0, 0, 0], 3));
+elevationRayLine = new THREE.Line(elevationRayGeometry, elevationRayMaterial);
+elevationRayLine.frustumCulled = false;
+elevationRayLine.visible = false;
+elevationRayLine.renderOrder = 6;
+scene.add(elevationRayLine);
+
+function computeLatLonForVertex(idx, originOverride = null) {
+  const source = originOverride
+    ? originOverride.clone()
+    : (subdividedGeometry.originalVertices[idx] || subdividedGeometry.vertices[idx] || null);
+  if (!source) return null;
+
+  tmpElevationDir.copy(source).normalize();
+  updateElevationRayIndicator(tmpElevationDir);
+  tmpElevationHit.copy(tmpElevationDir).multiplyScalar(EARTH_RADIUS_M);
+  const { latDeg, lonDeg } = cartesianToLatLon(tmpElevationHit);
+  return {
+    lat: Number(latDeg.toFixed(6)),
+    lon: Number(lonDeg.toFixed(6))
+  };
+}
+
+function ensureVertexMetadata(idx) {
+  if (idx == null) return null;
+  let data = subdividedGeometry.vertexData.get(idx);
+  if (data) return data;
+
+  const origin = subdividedGeometry.originalVertices[idx] || subdividedGeometry.vertices[idx];
+  if (!origin) return null;
+
+  const latLon = computeLatLonForVertex(idx, origin);
+  if (!latLon) return null;
+  const { lat, lon } = latLon;
+  const geohash = geohashEncode(lat, lon, 9);
+
+  data = {
+    lat,
+    lon,
+    geohash,
+    elevation: null,
+    fetching: false
+  };
+  subdividedGeometry.vertexData.set(idx, data);
+  return data;
+}
+
+function updateFocusIndicators(point) {
+  if (!focusRay || !focusRayGeometry || !focusRayLine) {
+    return;
+  }
+
+  if (!point) {
+    focusRayLine.visible = false;
+    if (!SHOW_FOCUS_MARKER && focusMarker) {
+      focusMarker.visible = false;
+    }
+    return;
+  }
+
+  tmpFocusDir.copy(point);
+  if (tmpFocusDir.lengthSq() < 1e-8) {
+    focusRayLine.visible = false;
+    if (!SHOW_FOCUS_MARKER && focusMarker) {
+      focusMarker.visible = false;
+    }
+    return;
+  }
+  tmpFocusDir.normalize();
+  focusRay.origin.set(0, 0, 0);
+  focusRay.direction.copy(tmpFocusDir);
+
+  const positions = focusRayGeometry.attributes.position.array;
+  positions[0] = 0;
+  positions[1] = 0;
+  positions[2] = 0;
+
+  tmpFocusEnd.copy(tmpFocusDir).multiplyScalar(FOCUS_RAY_LENGTH);
+  positions[3] = tmpFocusEnd.x;
+  positions[4] = tmpFocusEnd.y;
+  positions[5] = tmpFocusEnd.z;
+  focusRayGeometry.attributes.position.needsUpdate = true;
+  focusRayGeometry.computeBoundingSphere();
+
+  focusRayLine.visible = true;
+
+  if (SHOW_FOCUS_MARKER && focusMarker) {
+    focusMarker.position.copy(point);
+    focusMarker.visible = true;
+  } else if (focusMarker) {
+    focusMarker.visible = false;
+  }
+}
+
+function updateElevationRayIndicator(direction) {
+  if (!elevationRay || !elevationRayGeometry || !elevationRayLine) return;
+
+  if (!direction || direction.lengthSq() < 1e-8) {
+    elevationRayLine.visible = false;
+    return;
+  }
+
+  elevationRay.origin.set(0, 0, 0);
+  elevationRay.direction.copy(direction).normalize();
+
+  const positions = elevationRayGeometry.attributes.position.array;
+  positions[0] = 0;
+  positions[1] = 0;
+  positions[2] = 0;
+
+  tmpElevationHit.copy(elevationRay.direction).multiplyScalar(EARTH_RADIUS_M * 1.2);
+  positions[3] = tmpElevationHit.x;
+  positions[4] = tmpElevationHit.y;
+  positions[5] = tmpElevationHit.z;
+
+  elevationRayGeometry.attributes.position.needsUpdate = true;
+  elevationRayGeometry.computeBoundingSphere();
+  elevationRayLine.visible = true;
+}
+
+function initMarkerInstanceMesh() {
+  if (markerInstanceMesh) {
+    scene.remove(markerInstanceMesh);
+  }
+  markerInstanceMesh = new THREE.InstancedMesh(markerGeometry, markerMaterial, MAX_MARKERS);
+  markerInstanceMesh.frustumCulled = false;
+  scene.add(markerInstanceMesh);
+  markerCount = 0;
+  vertexMarkerIndices.clear();
+}
+
+function createVertexMarker(vertexIdx) {
+  const v = subdividedGeometry.vertices[vertexIdx];
+  if (!v || markerCount >= MAX_MARKERS) return;
+
+  // Position marker slightly above surface
+  const pos = v.clone().normalize().multiplyScalar(EARTH_RADIUS_M + 10);
+
+  // Orient marker to face outward from sphere
+  const lookAt = v.clone().normalize().multiplyScalar(EARTH_RADIUS_M + 1000);
+  const matrix = new THREE.Matrix4();
+  matrix.lookAt(pos, lookAt, v.clone().normalize());
+  matrix.setPosition(pos);
+
+  const instanceIdx = markerCount++;
+  markerInstanceMesh.setMatrixAt(instanceIdx, matrix);
+  markerInstanceMesh.setColorAt(instanceIdx, WHITE_COLOR);
+  vertexMarkerIndices.set(vertexIdx, instanceIdx);
+}
+
+function updateVertexMarkerColor(vertexIdx, hasElevation) {
+  const instanceIdx = vertexMarkerIndices.get(vertexIdx);
+  if (instanceIdx !== undefined && markerInstanceMesh) {
+    markerInstanceMesh.setColorAt(instanceIdx, hasElevation ? GREEN_COLOR : WHITE_COLOR);
+    markerInstanceMesh.instanceColor.needsUpdate = true;
+  }
+}
+
+function clearAllVertexMarkers() {
+  initMarkerInstanceMesh();
+}
+
+// Initialize marker system
+initMarkerInstanceMesh();
+updateFocusIndicators(focusedPoint);
+
+function resetTerrainGeometryToBase() {
+  clearAllVertexMarkers();
+
+  subdividedGeometry.vertices = baseIcosahedron.vertices.map(v => v.clone());
+  subdividedGeometry.originalVertices = baseIcosahedron.vertices.map(v => v.clone());
+  subdividedGeometry.faces = baseIcosahedron.faces.map(face => [...face]);
+  subdividedGeometry.edgeCache.clear();
+  subdividedGeometry.vertexData.clear();
+  subdividedGeometry.faceBaseIndex = baseIcosahedron.faces.map((_, idx) => idx);
+
+  subdividedGeometry.uvCoords = [];
+  for (let v of subdividedGeometry.vertices) {
+    const normalized = v.clone().normalize();
+    let u = 0.5 - Math.atan2(normalized.z, normalized.x) / (2 * Math.PI);
+    u = (u + 0.5) % 1.0;
+    const vCoord = 0.5 + Math.asin(normalized.y) / Math.PI;
+    subdividedGeometry.uvCoords.push([u, vCoord]);
+  }
+
+  updateGlobeMesh();
+  dom.queueCount.textContent = '0';
+}
+
+// Helper to get/create midpoint vertex
+function getMidpointVertex(v1Idx, v2Idx) {
+  const key = v1Idx < v2Idx ? `${v1Idx}_${v2Idx}` : `${v2Idx}_${v1Idx}`;
+
+  if (subdividedGeometry.edgeCache.has(key)) {
+    return subdividedGeometry.edgeCache.get(key);
+  }
+
+  const v1 = subdividedGeometry.vertices[v1Idx];
+  const v2 = subdividedGeometry.vertices[v2Idx];
+
+  // Midpoint on sphere surface
+  const mid = new THREE.Vector3().addVectors(v1, v2).multiplyScalar(0.5);
+  mid.normalize().multiplyScalar(EARTH_RADIUS_M);
+
+  const newIdx = subdividedGeometry.vertices.length;
+  subdividedGeometry.vertices.push(mid.clone());
+  subdividedGeometry.originalVertices.push(mid.clone()); // Store original un-elevated position
+
+  // Calculate and store UV coordinates BEFORE elevation is applied
+  const normalized = mid.clone().normalize();
+  let u = 0.5 - Math.atan2(normalized.z, normalized.x) / (2 * Math.PI);
+  u = (u + 0.5) % 1.0;  // Rotate 180° around poles
+  const v_coord = 0.5 + Math.asin(normalized.y) / Math.PI;
+  subdividedGeometry.uvCoords.push([u, v_coord]);
+
+  ensureVertexMetadata(newIdx);
+  subdividedGeometry.edgeCache.set(key, newIdx);
+
+  return newIdx;
+}
+
+// Subdivide a triangle (recursively splits into 4 smaller triangles)
+function subdivideTriangle(v1Idx, v2Idx, v3Idx) {
+  const v12 = getMidpointVertex(v1Idx, v2Idx);
+  const v23 = getMidpointVertex(v2Idx, v3Idx);
+  const v31 = getMidpointVertex(v3Idx, v1Idx);
+
+  // Return 4 new triangles
+  return [
+    [v1Idx, v12, v31],
+    [v12, v2Idx, v23],
+    [v31, v23, v3Idx],
+    [v12, v23, v31]  // Center triangle
+  ];
+}
+
+// Calculate distance from point to character position (along surface arc, not through Earth)
+function distanceToCharacter(vertex) {
+  // Calculate great circle distance on sphere surface
+  const v1 = vertex.clone().normalize();
+  const v2 = surfacePosition.clone().normalize();
+  const angle = Math.acos(THREE.MathUtils.clamp(v1.dot(v2), -1, 1));
+  return angle * EARTH_RADIUS_M; // Arc length = angle * radius
+}
+
+function surfaceDistanceBetween(a, b) {
+  const v1 = a.clone().normalize();
+  const v2 = b.clone().normalize();
+  const angle = Math.acos(THREE.MathUtils.clamp(v1.dot(v2), -1, 1));
+  return angle * EARTH_RADIUS_M;
+}
+
+function distanceToFocusPoint(vertex) {
+  if (!focusedPoint) return distanceToCharacter(vertex);
+  return surfaceDistanceBetween(vertex, focusedPoint);
+}
+
+function findClosestBaseFaceIndex() {
+  let closestIndex = 0;
+  let closestDist = Infinity;
+  for (let i = 0; i < baseIcosahedron.faces.length; i++) {
+    const tri = baseIcosahedron.faces[i];
+    const v1 = baseIcosahedron.vertices[tri[0]];
+    const v2 = baseIcosahedron.vertices[tri[1]];
+    const v3 = baseIcosahedron.vertices[tri[2]];
+    const center = new THREE.Vector3().add(v1).add(v2).add(v3).divideScalar(3);
+    const dist = distanceToCharacter(center);
+    if (dist < closestDist) {
+      closestDist = dist;
+      closestIndex = i;
+    }
+  }
+  return closestIndex;
+}
+
+function projectPointOntoTriangle(point, a, b, c, outBary, outProjected) {
+  triangleHelper.set(a, b, c);
+  tmpPlane.setFromCoplanarPoints(a, b, c);
+  tmpPlane.projectPoint(point, outProjected);
+
+  triangleHelper.getBarycoord(outProjected, outBary);
+
+  const sum = outBary.x + outBary.y + outBary.z;
+  if (!Number.isFinite(sum) || Math.abs(sum) <= 1e-9) {
+    outBary.set(1/3, 1/3, 1/3);
+    return false;
+  }
+
+  if (Math.abs(sum - 1) > 1e-4) {
+    outBary.multiplyScalar(1 / sum);
+  }
+
+  const minComponent = Math.min(outBary.x, outBary.y, outBary.z);
+  return minComponent >= -FOCUS_BARY_EPS;
+}
+
+function updateFocusedFaceBary(faceIndex, point) {
+  if (faceIndex == null) {
+    hasFocusedBary = false;
+    focusedFaceBary.set(1/3, 1/3, 1/3);
+    return;
+  }
+  const face = baseIcosahedron.faces[faceIndex];
+  if (!face) {
+    hasFocusedBary = false;
+    return;
+  }
+  const a = baseIcosahedron.vertices[face[0]];
+  const b = baseIcosahedron.vertices[face[1]];
+  const c = baseIcosahedron.vertices[face[2]];
+  if (!a || !b || !c) {
+    hasFocusedBary = false;
+    return;
+  }
+
+  let barySet = false;
+  if (focusRay.direction.lengthSq() > 0) {
+    const hit = focusRay.intersectTriangle(a, b, c, false, tmpRayHit);
+    if (hit) {
+      triangleHelper.set(a, b, c);
+      triangleHelper.getBarycoord(tmpRayHit, focusedFaceBary);
+      const minComponent = Math.min(focusedFaceBary.x, focusedFaceBary.y, focusedFaceBary.z);
+      if (minComponent >= -FOCUS_BARY_EPS) {
+        barySet = true;
+        hasFocusedBary = true;
+      }
+    }
+  }
+
+  if (!barySet) {
+    hasFocusedBary = projectPointOntoTriangle(point, a, b, c, focusedFaceBary, tmpProjected);
+  }
+
+  if (!hasFocusedBary) {
+    const sum = focusedFaceBary.x + focusedFaceBary.y + focusedFaceBary.z;
+    if (Math.abs(sum) > 1e-6) {
+      focusedFaceBary.multiplyScalar(1 / sum);
+    } else {
+      focusedFaceBary.set(1/3, 1/3, 1/3);
+    }
+  }
+}
+
+// Check if a triangle should be subdivided based on focus ray intersection
+function shouldSubdivideTriangle(triangle, baseFaceIndex, focusPathActive, distanceToFocus = null) {
+  if (focusedBaseFaceIndex != null && baseFaceIndex !== focusedBaseFaceIndex) {
+    return false;
+  }
+
+  const v1 = subdividedGeometry.vertices[triangle[0]];
+  const v2 = subdividedGeometry.vertices[triangle[1]];
+  const v3 = subdividedGeometry.vertices[triangle[2]];
+
+  const edge1 = v1.distanceTo(v2);
+  const edge2 = v2.distanceTo(v3);
+  const edge3 = v3.distanceTo(v1);
+  const maxEdge = Math.max(edge1, edge2, edge3);
+
+  const center = tmpCenter.copy(v1).add(v2).add(v3).multiplyScalar(1 / 3);
+  const distToFocus = Number.isFinite(distanceToFocus)
+    ? distanceToFocus
+    : distanceToFocusPoint(center);
+
+  const approxRadius = maxEdge * 0.5;
+  const effectiveDist = Math.max(0, distToFocus - approxRadius);
+
+  const maxRadius = Math.max(settings.maxRadius, 1);
+  if (!Number.isFinite(distToFocus) || effectiveDist > maxRadius) {
+    return false;
+  }
+
+  const minEdge = Math.max(settings.minSpacingM, 0.1);
+  const maxEdgeAllowed = Math.max(settings.maxSpacingM, minEdge);
+  const fineRadius = Math.max(settings.fineDetailRadius, 0);
+
+  let targetEdge = maxEdgeAllowed;
+
+  if (focusPathActive || effectiveDist <= fineRadius) {
+    targetEdge = minEdge;
+  } else {
+    const falloff = Math.max(settings.fineDetailFalloff, 1);
+    const t = Math.min((effectiveDist - fineRadius) / falloff, 1);
+    const smooth = t * t * (3 - 2 * t); // smoothstep easing
+    const farNorm = Math.min(distToFocus / maxRadius, 1);
+    const farTarget = minEdge + (maxEdgeAllowed - minEdge) * farNorm;
+    targetEdge = THREE.MathUtils.lerp(minEdge, farTarget, smooth);
+  }
+
+  return maxEdge > targetEdge;
+}
+
+// Rebuild globe geometry with adaptive subdivision
+function rebuildGlobeGeometry() {
+  const startTime = performance.now();
+
+  // Debug: Log user position
+  const shouldLog = FOCUS_DEBUG;
+  if (shouldLog) {
+    console.log(`🎯 User surface position: (${surfacePosition.x.toFixed(0)}, ${surfacePosition.y.toFixed(0)}, ${surfacePosition.z.toFixed(0)}), length=${surfacePosition.length().toFixed(0)}m`);
+    const userLatLon = cartesianToLatLon(surfacePosition);
+    console.log(`🌍 User GPS: ${userLatLon.latDeg.toFixed(4)}°, ${userLatLon.lonDeg.toFixed(4)}°`);
+  }
+
+  // Clear old markers
+  clearAllVertexMarkers();
+
+  // Reset subdivision state
+  subdividedGeometry.vertices = [...baseIcosahedron.vertices.map(v => v.clone())];
+  subdividedGeometry.originalVertices = [...baseIcosahedron.vertices.map(v => v.clone())]; // Store originals
+  subdividedGeometry.faces = [];
+  subdividedGeometry.edgeCache.clear();
+  subdividedGeometry.vertexData.clear(); // Clear elevation data so vertices start with null
+  subdividedGeometry.faceBaseIndex = [];
+
+  // Initialize UV coordinates for base vertices
+  subdividedGeometry.uvCoords = [];
+  for (let v of subdividedGeometry.vertices) {
+    const normalized = v.clone().normalize();
+    let u = 0.5 - Math.atan2(normalized.z, normalized.x) / (2 * Math.PI);
+    u = (u + 0.5) % 1.0;  // Rotate 180° around poles
+    const v_coord = 0.5 + Math.asin(normalized.y) / Math.PI;
+    subdividedGeometry.uvCoords.push([u, v_coord]);
+  }
+
+  // Process each base triangle with cascading adaptive subdivision
+  let subdivisionCount = 0;
+  let maxDepth = 0;
+  let closestTriDist = Infinity;
+  let closestTriEdge = 0;
+
+  // Reset smallest edge tracking
+  smallestEdgeFound = Infinity;
+  smallestEdgeDist = 0;
+
+  if (focusedBaseFaceIndex == null) {
+    focusedBaseFaceIndex = findClosestBaseFaceIndex();
+    updateFocusedFaceBary(focusedBaseFaceIndex, focusedPoint);
+  }
+
+  const focusData =
+    focusedBaseFaceIndex != null
+      ? { ray: focusRay }
+      : null;
+
+  if (focusData && FOCUS_DEBUG) {
+    console.log(`🎯 Starting subdivision with focus at base face ${focusedBaseFaceIndex}`);
+    console.log(`📍 Focus point: (${focusedPoint.x.toFixed(0)}, ${focusedPoint.y.toFixed(0)}, ${focusedPoint.z.toFixed(0)})`);
+  }
+
+  baseIcosahedron.faces.forEach((tri, faceIndex) => {
+    // Check distance of this base triangle to user
+    const v1 = subdividedGeometry.vertices[tri[0]];
+    const v2 = subdividedGeometry.vertices[tri[1]];
+    const v3 = subdividedGeometry.vertices[tri[2]];
+    const center = new THREE.Vector3().add(v1).add(v2).add(v3).divideScalar(3);
+    const dist = distanceToCharacter(center);
+    if (dist < closestTriDist) {
+      closestTriDist = dist;
+      closestTriEdge = v1.distanceTo(v2);
+    }
+
+    const focusPayload =
+      focusData && hasFocusedBary && focusedBaseFaceIndex === faceIndex
+        ? focusData
+        : null;
+
+    if (focusPayload && FOCUS_DEBUG) {
+      console.log(`🔍 Processing base face ${faceIndex} (THE FOCUSED FACE)`);
+    }
+
+    const result = subdivideTriangleCascading(tri, 0, faceIndex, focusPayload);
+    maxDepth = Math.max(maxDepth, result.maxDepth);
+    subdivisionCount += result.count;
+  });
+
+  if (shouldLog) {
+    console.log(`📊 Subdivision: max depth=${maxDepth}, operations=${subdivisionCount}`);
+    console.log(`📍 Closest base triangle: dist=${closestTriDist.toFixed(0)}m, edge=${closestTriEdge.toFixed(0)}m`);
+    console.log(`🔬 Smallest triangle created: edge=${smallestEdgeFound.toFixed(2)}m at dist=${smallestEdgeDist.toFixed(0)}m from user`);
+  }
+
+  // Create markers for new subdivided vertices
+  for (let i = baseIcosahedron.vertices.length; i < subdividedGeometry.vertices.length; i++) {
+    createVertexMarker(i);
+  }
+
+  // Update instance mesh matrices and colors
+  if (markerInstanceMesh) {
+    markerInstanceMesh.count = markerCount; // CRITICAL: Tell Three.js how many instances to render!
+    markerInstanceMesh.instanceMatrix.needsUpdate = true;
+    if (markerInstanceMesh.instanceColor) {
+      markerInstanceMesh.instanceColor.needsUpdate = true;
+    }
+  }
+
+  // Update globe mesh
+  updateGlobeMesh();
+
+  if (shouldLog) {
+    const elapsed = performance.now() - startTime;
+    console.log(`⏱️ TOTAL rebuild: ${elapsed.toFixed(2)}ms - ${subdividedGeometry.vertices.length} vertices, ${subdividedGeometry.faces.length} faces`);
+  }
+}
+
+// Recursively subdivide triangle to target level
+// Track smallest triangles for debug logging
+let smallestEdgeFound = Infinity;
+let smallestEdgeDist = 0;
+
+// Cascading adaptive subdivision - each triangle decides if IT needs to split
+function subdivideTriangleCascading(triangle, depth, baseFaceIndex, focusData) {
+  const MAX_DEPTH = 20; // Safety limit to prevent infinite recursion
+
+  if (depth > MAX_DEPTH) {
+    subdividedGeometry.faces.push(triangle);
+    subdividedGeometry.faceBaseIndex.push(baseFaceIndex);
+    return { maxDepth: depth, count: 1 };
+  }
+
+  if (subdividedGeometry.vertices.length >= settings.maxVertices) {
+    subdividedGeometry.faces.push(triangle);
+    subdividedGeometry.faceBaseIndex.push(baseFaceIndex);
+    return { maxDepth: depth, count: 1 };
+  }
+
+  const v1 = subdividedGeometry.vertices[triangle[0]];
+  const v2 = subdividedGeometry.vertices[triangle[1]];
+  const v3 = subdividedGeometry.vertices[triangle[2]];
+  const center = tmpCenter.copy(v1).add(v2).add(v3).multiplyScalar(1/3);
+
+  const ray = focusData?.ray || null;
+  let rayHits = false;
+  let focusDistanceToCenter = null;
+  const centerDistanceToFocus = distanceToFocusPoint(center);
+
+  if (ray) {
+    const hit = ray.intersectTriangle(v1, v2, v3, false, tmpRayHit);
+    if (hit) {
+      rayHits = true;
+      focusDistanceToCenter = centerDistanceToFocus;
+    }
+  }
+
+  if (!shouldSubdivideTriangle(triangle, baseFaceIndex, rayHits, focusDistanceToCenter ?? centerDistanceToFocus)) {
+    subdividedGeometry.faces.push(triangle);
+    subdividedGeometry.faceBaseIndex.push(baseFaceIndex);
+
+    const edge = v1.distanceTo(v2);
+    if (edge < smallestEdgeFound) {
+      const leafCenter = new THREE.Vector3().add(v1).add(subdividedGeometry.vertices[triangle[2]]).divideScalar(2);
+      const dist = distanceToCharacter(leafCenter);
+      smallestEdgeFound = edge;
+      smallestEdgeDist = dist;
+    }
+
+    return { maxDepth: depth, count: 1 };
+  }
+
+  const subTriangles = subdivideTriangle(triangle[0], triangle[1], triangle[2]);
+
+  let maxDepth = depth;
+  let count = 1;
+  let focusChildIndex = -1;
+
+  if (ray) {
+    let bestScore = -Infinity;
+    let fallbackScore = Infinity;
+    let fallbackIndex = -1;
+
+    for (let i = 0; i < subTriangles.length; i++) {
+      const subTri = subTriangles[i];
+      const a = subdividedGeometry.vertices[subTri[0]];
+      const b = subdividedGeometry.vertices[subTri[1]];
+      const c = subdividedGeometry.vertices[subTri[2]];
+      const hit = ray.intersectTriangle(a, b, c, false, tmpRayHit);
+
+      if (hit) {
+        triangleHelper.set(a, b, c);
+        triangleHelper.getBarycoord(tmpRayHit, tmpBary);
+        const minComponent = Math.min(tmpBary.x, tmpBary.y, tmpBary.z);
+
+        if (minComponent >= -FOCUS_BARY_EPS) {
+          if (minComponent > bestScore) {
+            bestScore = minComponent;
+            focusChildIndex = i;
+          }
+        } else {
+          const outsideScore = Math.max(-tmpBary.x, -tmpBary.y, -tmpBary.z);
+          if (outsideScore < fallbackScore) {
+            fallbackScore = outsideScore;
+            fallbackIndex = i;
+          }
+        }
+
+        if (FOCUS_DEBUG && depth < 4) {
+          const baryStr = `[${tmpBary.x.toFixed(3)}, ${tmpBary.y.toFixed(3)}, ${tmpBary.z.toFixed(3)}]`;
+          if (minComponent >= -FOCUS_BARY_EPS) {
+            console.log(`  ${'  '.repeat(depth)}Child ${i}: intersects ray (bary ${baryStr})`);
+          } else {
+            console.log(`  ${'  '.repeat(depth)}Child ${i}: near ray (bary ${baryStr})`);
+          }
+        }
+      }
+    }
+
+    if (focusChildIndex === -1 && fallbackIndex !== -1) {
+      focusChildIndex = fallbackIndex;
+      if (FOCUS_DEBUG && depth < 4) {
+        console.warn(`  ${'  '.repeat(depth)}Using fallback child ${fallbackIndex} for focus propagation`);
+      }
+    }
+
+    if (focusChildIndex === -1) {
+      let bestDot = -Infinity;
+      const rayDir = ray.direction;
+      for (let i = 0; i < subTriangles.length; i++) {
+        const subTri = subTriangles[i];
+        const a = subdividedGeometry.vertices[subTri[0]];
+        const b = subdividedGeometry.vertices[subTri[1]];
+        const c = subdividedGeometry.vertices[subTri[2]];
+        tmpChildCenter.copy(a).add(b).add(c).multiplyScalar(1/3).normalize();
+        const dot = tmpChildCenter.dot(rayDir);
+        if (dot > bestDot) {
+          bestDot = dot;
+          focusChildIndex = i;
+        }
+      }
+      if (FOCUS_DEBUG && depth < 4) {
+        console.warn(`  ${'  '.repeat(depth)}Selecting child ${focusChildIndex} via directional fallback`);
+      }
+    }
+  }
+
+  for (let i = 0; i < subTriangles.length; i++) {
+    const nextFocusData = ray && i === focusChildIndex ? focusData : null;
+    const result = subdivideTriangleCascading(subTriangles[i], depth + 1, baseFaceIndex, nextFocusData);
+    maxDepth = Math.max(maxDepth, result.maxDepth);
+    count += result.count;
+  }
+
+  return { maxDepth, count };
+}
+
+// Update the globe mesh with new geometry
+function updateGlobeMesh() {
+  const verts = subdividedGeometry.vertices;
+  const faces = subdividedGeometry.faces;
+
+  const positions = new Float32Array(verts.length * 3);
+  const uvs = new Float32Array(verts.length * 2);
+
+  for (let i = 0; i < verts.length; i++) {
+    positions[i * 3 + 0] = verts[i].x;
+    positions[i * 3 + 1] = verts[i].y;
+    positions[i * 3 + 2] = verts[i].z;
+
+    // Use pre-calculated UV coordinates (stored before elevation was applied)
+    if (subdividedGeometry.uvCoords[i]) {
+      uvs[i * 2 + 0] = subdividedGeometry.uvCoords[i][0];
+      uvs[i * 2 + 1] = subdividedGeometry.uvCoords[i][1];
+    }
+  }
+
+  const indices = new Uint32Array(faces.length * 3);
+  for (let i = 0; i < faces.length; i++) {
+    indices[i * 3 + 0] = faces[i][0];
+    indices[i * 3 + 1] = faces[i][1];
+    indices[i * 3 + 2] = faces[i][2];
+  }
+
+  globeGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  globeGeometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+  globeGeometry.setIndex(new THREE.BufferAttribute(indices, 1));
+  globeGeometry.computeVertexNormals();
+  globeGeometry.computeBoundingSphere();
+  globeGeometry.computeBoundingBox();
+  globeGeometry.attributes.position.needsUpdate = true;
+  globeGeometry.attributes.uv.needsUpdate = true;
+  if (globeGeometry.attributes.normal) {
+    globeGeometry.attributes.normal.needsUpdate = true;
+  }
+  globeGeometry.index.needsUpdate = true;
+  globeGeometry.userData.faceBaseIndex = subdividedGeometry.faceBaseIndex.slice();
+  if (globe.material) globe.material.needsUpdate = true;
+  if (globeMaterial) globeMaterial.needsUpdate = true;
+
+  // Update wireframe - draw ALL edges to show subdivision structure
+  const wireframePositions = new Float32Array(faces.length * 6 * 3); // 3 edges per face, 2 verts per edge, 3 coords
+  let wireIdx = 0;
+
+  for (let i = 0; i < faces.length; i++) {
+    const [v0, v1, v2] = faces[i];
+
+    // Edge 0-1
+    wireframePositions[wireIdx++] = verts[v0].x;
+    wireframePositions[wireIdx++] = verts[v0].y;
+    wireframePositions[wireIdx++] = verts[v0].z;
+    wireframePositions[wireIdx++] = verts[v1].x;
+    wireframePositions[wireIdx++] = verts[v1].y;
+    wireframePositions[wireIdx++] = verts[v1].z;
+
+    // Edge 1-2
+    wireframePositions[wireIdx++] = verts[v1].x;
+    wireframePositions[wireIdx++] = verts[v1].y;
+    wireframePositions[wireIdx++] = verts[v1].z;
+    wireframePositions[wireIdx++] = verts[v2].x;
+    wireframePositions[wireIdx++] = verts[v2].y;
+    wireframePositions[wireIdx++] = verts[v2].z;
+
+    // Edge 2-0
+    wireframePositions[wireIdx++] = verts[v2].x;
+    wireframePositions[wireIdx++] = verts[v2].y;
+    wireframePositions[wireIdx++] = verts[v2].z;
+    wireframePositions[wireIdx++] = verts[v0].x;
+    wireframePositions[wireIdx++] = verts[v0].y;
+    wireframePositions[wireIdx++] = verts[v0].z;
+  }
+
+  wireframeGeometry.setAttribute('position', new THREE.BufferAttribute(wireframePositions, 3));
+  wireframeGeometry.attributes.position.needsUpdate = true;
+
+  // Update UI counts
+  dom.vertCount.textContent = verts.length;
+  dom.tileCount.textContent = faces.length;
+}
+
+// Fetch elevation data for vertices (batch request)
+async function fetchVertexElevation(vertexIndices, runId) {
+  if (!settings.nknRelay || vertexIndices.length === 0) return;
+  if (runId !== currentRegenerationRunId) return;
+
+  const waitStart = performance.now();
+  while (!nknReady) {
+    if (runId !== currentRegenerationRunId || cancelRegeneration) return;
+    await new Promise(resolve => setTimeout(resolve, 100));
+    if (performance.now() - waitStart > 15000) {
+      console.warn('⚠️ NKN still not ready after 15s; skipping elevation fetch this pass.');
+      return;
+    }
+  }
+
+  const PACE_DELAY_MS = 5;
+
+  const requests = [];
+  const ghToEntries = new Map();
+  const latLonToEntries = new Map();
+
+  const ghPrec = 9;
+
+  const resetPending = () => {
+    for (const entry of requests) {
+      if (entry?.meta) {
+        entry.meta.fetching = false;
+      }
+    }
+  };
+
+  for (const idx of vertexIndices) {
+    if (runId !== currentRegenerationRunId || cancelRegeneration) {
+      resetPending();
+      return;
+    }
+    const meta = ensureVertexMetadata(idx);
+    if (!meta) continue;
+    if (meta.fetching) continue;
+    if (meta.elevation != null) continue;
+
+    meta.fetching = true;
+
+    const originVec = subdividedGeometry.originalVertices[idx] || subdividedGeometry.vertices[idx];
+    if (originVec) {
+      tmpElevationDir.copy(originVec).normalize();
+      updateElevationRayIndicator(tmpElevationDir);
+    }
+
+    const lat = meta.lat;
+    const lon = meta.lon;
+    const geohash = meta.geohash || geohashEncode(lat, lon, ghPrec);
+    meta.geohash = geohash;
+    console.log(`🧭 Vertex ${idx}: lat=${lat.toFixed(6)} lon=${lon.toFixed(6)} gh=${geohash}`);
+
+    requests.push({ idx, meta, lat, lon, geohash });
+
+    if (!ghToEntries.has(geohash)) ghToEntries.set(geohash, []);
+    ghToEntries.get(geohash).push({ idx, meta });
+
+    const key = `${lat.toFixed(6)},${lon.toFixed(6)}`;
+    if (!latLonToEntries.has(key)) latLonToEntries.set(key, []);
+    latLonToEntries.get(key).push({ idx, meta });
+  }
+
+  if (requests.length === 0) {
+    updateElevationRayIndicator(null);
+    return;
+  }
+
+  const req = {
+    type: 'elev.query',
+    dataset: settings.dataset,
+    geohashes: requests.map(r => r.geohash),
+    enc: 'geohash',
+    prec: ghPrec,
+    vertices: requests.map(r => ({ lat: r.lat, lon: r.lon, idx: r.idx }))
+  };
+
+  const markComplete = (entry, height) => {
+    const { idx, meta } = entry;
+    if (!meta) return;
+    meta.fetching = false;
+    if (!Number.isFinite(height)) return;
+    meta.elevation = height;
+
+    const originalPos = subdividedGeometry.originalVertices[idx];
+    if (!originalPos) return;
+    const baseRadius = originalPos.length();
+    const radialDir = originalPos.clone().normalize();
+    const targetRadius = baseRadius + height * settings.elevExag;
+    subdividedGeometry.vertices[idx].copy(radialDir.multiplyScalar(targetRadius));
+
+    updateVertexMarkerColor(idx, true);
+    console.log(`⬆️ Elevation applied vertex ${idx}: lat=${meta.lat?.toFixed(6)} lon=${meta.lon?.toFixed(6)} elev=${height.toFixed(2)}m`);
+  };
+
+  try {
+    const resp = await sendWithReply(settings.nknRelay, req, 30000);
+    if (runId !== currentRegenerationRunId || cancelRegeneration) {
+      resetPending();
+      return;
+    }
+
+    let json = null;
+    if (resp.body_b64) {
+      json = JSON.parse(atob(resp.body_b64));
+    } else if (resp.body) {
+      json = (typeof resp.body === 'string') ? JSON.parse(resp.body) : resp.body;
+    }
+
+    let updated = false;
+
+    const applyHeightToEntries = (entries, height) => {
+      if (!entries || !entries.length) return;
+      for (const entry of entries) {
+        if (runId !== currentRegenerationRunId || cancelRegeneration) return;
+        markComplete(entry, height);
+        updated = true;
+      }
+    };
+
+    const extractHeight = (result) => {
+      if (!result) return null;
+      const value =
+        result.elev ??
+        result.elevation ??
+        result.height ??
+        result.value ??
+        result.z ??
+        result.h ??
+        result.d ??
+        result.v;
+      if (Number.isFinite(value)) return Number(value);
+      return null;
+    };
+
+    if (json && Array.isArray(json.results)) {
+      if (runId !== currentRegenerationRunId || cancelRegeneration) {
+        resetPending();
+        return;
+      }
+
+      for (const res of json.results) {
+        if (runId !== currentRegenerationRunId || cancelRegeneration) {
+          resetPending();
+          return;
+        }
+        const height = extractHeight(res);
+        if (!Number.isFinite(height)) continue;
+
+        let matched = false;
+
+        const hashKey = res?.geohash || res?.hash || res?.key;
+        if (hashKey && ghToEntries.has(hashKey)) {
+          applyHeightToEntries(ghToEntries.get(hashKey), height);
+          matched = true;
+        }
+
+        const loc = res?.location || res?.loc;
+        if (!matched && loc) {
+          const lat = Number(loc.lat ?? loc.latitude ?? loc[0]);
+          const lon = Number(loc.lon ?? loc.lng ?? loc.longitude ?? loc[1]);
+          if (Number.isFinite(lat) && Number.isFinite(lon)) {
+            const key = `${lat.toFixed(6)},${lon.toFixed(6)}`;
+            if (latLonToEntries.has(key)) {
+              applyHeightToEntries(latLonToEntries.get(key), height);
+              matched = true;
+            }
+          }
+        }
+
+        if (!matched && res?.geohashes && Array.isArray(res.geohashes) && Array.isArray(res.elevations)) {
+          for (let i = 0; i < res.geohashes.length; i++) {
+            const gh = res.geohashes[i];
+            const h = Number(res.elevations[i]);
+            if (!Number.isFinite(h)) continue;
+            applyHeightToEntries(ghToEntries.get(gh), h);
+          }
+          matched = true;
+        }
+
+        if (!matched && res?.values && Array.isArray(res.values)) {
+          const ghList = res.geohashes || res.hashes || res.keys;
+          if (Array.isArray(ghList) && ghList.length === res.values.length) {
+            for (let i = 0; i < ghList.length; i++) {
+              const gh = ghList[i];
+              const h = Number(res.values[i]);
+              if (!Number.isFinite(h)) continue;
+              applyHeightToEntries(ghToEntries.get(gh), h);
+            }
+          }
+        }
+      }
+    }
+
+    if (!updated && json) {
+      const ghList = json.geohashes || json.hashes || json.keys;
+      const values = json.elevations || json.heights || json.values;
+      if (Array.isArray(ghList) && Array.isArray(values) && ghList.length === values.length) {
+        for (let i = 0; i < ghList.length; i++) {
+          const gh = ghList[i];
+          const h = Number(values[i]);
+          if (!Number.isFinite(h)) continue;
+          applyHeightToEntries(ghToEntries.get(gh), h);
+        }
+      }
+
+      const samples = json.samples;
+      if (Array.isArray(samples)) {
+        for (const sample of samples) {
+          const height = extractHeight(sample);
+          if (!Number.isFinite(height)) continue;
+          let handled = false;
+          if (sample.geohash && ghToEntries.has(sample.geohash)) {
+            applyHeightToEntries(ghToEntries.get(sample.geohash), height);
+            handled = true;
+          }
+          if (!handled && sample.location) {
+            const lat = Number(sample.location.lat ?? sample.location.latitude);
+            const lon = Number(sample.location.lon ?? sample.location.lng ?? sample.location.longitude);
+            if (Number.isFinite(lat) && Number.isFinite(lon)) {
+              const key = `${lat.toFixed(6)},${lon.toFixed(6)}`;
+              applyHeightToEntries(latLonToEntries.get(key), height);
+            }
+          }
+        }
+      }
+    }
+
+    if (Array.isArray(json?.results)) {
+      const minLen = Math.min(requests.length, json.results.length);
+      for (let i = 0; i < minLen; i++) {
+        const entry = requests[i];
+        if (!entry || !entry.meta) continue;
+        if (entry.meta.elevation != null) continue;
+        const res = json.results[i];
+        const height = extractHeight(res);
+        if (!Number.isFinite(height)) continue;
+        markComplete(entry, height);
+        updated = true;
+      }
+    }
+
+    if (updated) {
+      updateGlobeMesh();
+    }
+  } catch (err) {
+    console.error('Elevation fetch error:', err);
+    resetPending();
+    return;
+  }
+
+  for (const { meta } of requests) {
+    if (meta && meta.fetching) {
+      meta.fetching = false;
+    }
+  }
+
+  updateElevationRayIndicator(null);
+}
+
+// Regenerate terrain by subdividing icosahedron
+let isRegenerating = false; // Guard flag to prevent concurrent regeneration
+let cancelRegeneration = false; // Signal to abort the current regeneration pass
+let hasQueuedRegeneration = false; // Tracks whether another regeneration should run after the current one
+let currentRegenerationRunId = 0; // Monotonic id so async fetches know if they're stale
+async function regenerateTerrain() {
+  if (!gps.have) return;
+
+  hasQueuedRegeneration = true;
+
+  if (isRegenerating) {
+    cancelRegeneration = true;
+    return;
+  }
+
+  isRegenerating = true;
+
+  try {
+    while (hasQueuedRegeneration) {
+      hasQueuedRegeneration = false;
+      cancelRegeneration = false;
+
+      const runId = ++currentRegenerationRunId;
+
+      const terrainStart = performance.now();
+      const userLatLon = cartesianToLatLon(surfacePosition);
+      if (FOCUS_DEBUG) console.log(`🔄 Subdividing icosahedron at ${userLatLon.latDeg.toFixed(4)}°, ${userLatLon.lonDeg.toFixed(4)}°`);
+      if (FOCUS_DEBUG) console.log(`🎯 Focused base face index: ${focusedBaseFaceIndex}`);
+
+      // Rebuild geometry with adaptive subdivision
+      const rebuildStart = performance.now();
+      rebuildGlobeGeometry();
+      if (FOCUS_DEBUG) console.log(`⏱️ Total rebuild time: ${(performance.now() - rebuildStart).toFixed(2)}ms`);
+
+      if (cancelRegeneration) {
+        dom.queueCount.textContent = '0';
+        if (FOCUS_DEBUG) console.log('⏹️ Terrain regeneration cancelled before collecting vertices; restarting with latest request.');
+        hasQueuedRegeneration = true;
+        continue;
+      }
+
+      // Collect new vertices that need elevation data
+      const collectStart = performance.now();
+      const newVertices = [];
+      for (let i = 0; i < subdividedGeometry.vertices.length; i++) {
+        if (cancelRegeneration) break;
+        const meta = ensureVertexMetadata(i);
+        if (!meta) continue;
+        if (meta.fetching) continue;
+        if (meta.elevation == null) {
+          newVertices.push(i);
+        }
+      }
+      if (FOCUS_DEBUG) console.log(`⏱️ Collect vertices: ${(performance.now() - collectStart).toFixed(2)}ms`);
+
+      if (cancelRegeneration) {
+        dom.queueCount.textContent = '0';
+        if (FOCUS_DEBUG) console.log('⏹️ Terrain regeneration cancelled during vertex collection; restarting with latest request.');
+        hasQueuedRegeneration = true;
+        continue;
+      }
+
+      // Sort vertices by distance from user position (closest first - radial outward fetching)
+      const sortStart = performance.now();
+      newVertices.sort((a, b) => {
+        const distA = subdividedGeometry.vertices[a].distanceTo(surfacePosition);
+        const distB = subdividedGeometry.vertices[b].distanceTo(surfacePosition);
+        return distA - distB;
+      });
+
+      // Prioritize fetching for base icosahedron vertices before subdivided ones
+      const baseVertexCount = baseIcosahedron.vertices.length;
+      if (baseVertexCount > 0 && newVertices.length > 1) {
+        const baseIndices = [];
+        const extraIndices = [];
+        for (let i = 0; i < newVertices.length; i++) {
+          const idx = newVertices[i];
+          if (idx < baseVertexCount) {
+            baseIndices.push(idx);
+          } else {
+            extraIndices.push(idx);
+          }
+        }
+        if (baseIndices.length) {
+          newVertices.length = 0;
+          newVertices.push(...baseIndices, ...extraIndices);
+        }
+      }
+      if (FOCUS_DEBUG) console.log(`⏱️ Sort vertices by distance: ${(performance.now() - sortStart).toFixed(2)}ms`);
+
+      if (FOCUS_DEBUG) console.log(`📦 Fetching elevation for ${newVertices.length} new vertices (radial outward from user)`);
+
+      // Batch fetch elevation data (limit batch size to avoid huge requests)
+      // Fetch closest vertices first so local terrain appears immediately
+      const fetchStart = performance.now();
+      const BATCH_SIZE = 500;
+      let cancelledMidFetch = false;
+      for (let i = 0; i < newVertices.length; i += BATCH_SIZE) {
+        if (cancelRegeneration) {
+          cancelledMidFetch = true;
+          break;
+        }
+
+        const batch = newVertices.slice(i, i + BATCH_SIZE);
+        await fetchVertexElevation(batch, runId);
+
+        if (cancelRegeneration || runId !== currentRegenerationRunId) {
+          cancelledMidFetch = true;
+          break;
+        }
+
+        // Update mesh progressively so user sees terrain building outward
+        updateGlobeMesh();
+
+        dom.queueCount.textContent = Math.max(0, newVertices.length - i - BATCH_SIZE);
+      }
+      if (FOCUS_DEBUG) console.log(`⏱️ Fetch elevation: ${(performance.now() - fetchStart).toFixed(2)}ms`);
+
+      if (cancelledMidFetch || cancelRegeneration || runId !== currentRegenerationRunId) {
+        if (FOCUS_DEBUG) console.log('⏹️ Terrain regeneration cancelled mid-run; restarting with latest request.');
+        dom.queueCount.textContent = '0';
+        hasQueuedRegeneration = true;
+        continue;
+      }
+
+      dom.queueCount.textContent = '0';
+
+      if (FOCUS_DEBUG) console.log(`⏱️ TOTAL regenerateTerrain: ${(performance.now() - terrainStart).toFixed(2)}ms`);
+    }
+  } finally {
+    isRegenerating = false;
+    cancelRegeneration = false;
+  }
+}
+
+// Initialize NKN and terrain on GPS lock
+let terrainInitialized = false;
+function maybeInitTerrain() {
+  if (!terrainInitialized && gps.have && nknReady) {
+    terrainInitialized = true;
+    console.log('🎯 Initial terrain generation at GPS location');
+    focusedPoint.copy(surfacePosition);
+    updateFocusIndicators(focusedPoint);
+    regenerateTerrain();
+  }
+}
+
+// ──────────────────────── Render Loop ────────────────────────
+let then = performance.now(), frames = 0, fps = 0, fpsAccum = 0;
+let lastSubdivisionUpdate = 0;
+let lastSubdivisionPosition = new THREE.Vector3();
+const SUBDIVISION_UPDATE_INTERVAL = 100; // ms - update subdivision 10 times per second for smooth cascading
+const SUBDIVISION_DISTANCE_THRESHOLD = 10; // meters - update if moved more than this for responsive LOD
+
+function tick(now) {
+  const dt = Math.min(0.05, (now - then) / 1000);
+  then = now;
+
+  // Compass pipeline (only on mobile)
+  if (isMobile) {
+    if (!haveCompass && gps.heading == null) {
+      synthesizeHeadingFromQuat();
+    } else if (gps.heading != null && !haveCompass) {
+      compassDeg = gps.heading;
+    }
+    updateCompassSmoothing();
+    tryInitialAlign();
+    maybeHideOverlayAfterAlign();
+  }
+
+  // Surface walking (desktop/mobile)
+  if (mode === 'surface') {
+    updateSurfaceWalking(dt);
+    updateSurfaceCameraOrientation();
+  }
+
+  // Update orbit controls
+  if (orbitControls.enabled) {
+    orbitControls.update();
+  }
+
+  // Try to initialize terrain once GPS+NKN ready
+  maybeInitTerrain();
+
+  // Dynamic subdivision update in render loop
+  if (terrainInitialized && gps.have) {
+    const timeSinceLastUpdate = now - lastSubdivisionUpdate;
+    const distanceMoved = surfacePosition.distanceTo(lastSubdivisionPosition);
+
+    // Update subdivision if enough time has passed OR if moved significantly
+    if (timeSinceLastUpdate > SUBDIVISION_UPDATE_INTERVAL || distanceMoved > SUBDIVISION_DISTANCE_THRESHOLD) {
+      lastSubdivisionUpdate = now;
+      lastSubdivisionPosition.copy(surfacePosition);
+
+      // Trigger non-blocking subdivision update
+      // Use setTimeout to prevent blocking the render loop
+      setTimeout(() => {
+        if (mode !== 'orbit' || followGPS) {
+          focusedBaseFaceIndex = null;
+          focusedPoint.copy(surfacePosition);
+          hasFocusedBary = false;
+          updateFocusIndicators(focusedPoint);
+        }
+        regenerateTerrain();
+      }, 0);
+    }
+  }
+
+  // Render
+  renderer.render(scene, activeCamera);
+
+  // FPS counter
+  frames++;
+  fpsAccum += dt;
+  if (fpsAccum >= 0.5) {
+    fps = Math.round(frames / fpsAccum);
+    frames = 0;
+    fpsAccum = 0;
+    dom.fps.textContent = fps.toString();
+  }
+
+  requestAnimationFrame(tick);
+}
+
+// ──────────────────────── Initialize ────────────────────────
+initNKN();
+requestAnimationFrame(tick);
+
+console.log('%c🏔️ TERRAIN GEN - PRODUCTION SYSTEM ACTIVE', 'background:#0d1220;color:#8bd1ff;font-size:16px;padding:8px;border-radius:4px');
+console.log('Adaptive terrain with Cesium-like LOD, NKN elevation fetching, and real-time progressive refinement.');
+
+</script>
+</body>
+</html>
